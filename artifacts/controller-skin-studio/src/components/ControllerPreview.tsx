@@ -5,8 +5,12 @@ import { LAYOUTS, ControllerType } from "../lib/layouts";
 import { ControllerConfig, LayoutOverrides } from "../types/config";
 import { LayoutEditor } from "./LayoutEditor";
 import { BodyEffectOverlay } from "./BodyEffectOverlay";
+import { StickCometOverlay, COMET_CONTAINER_SCALE } from "./StickCometOverlay";
+import { StickElectricOverlay, ELECTRIC_CONTAINER_SCALE } from "./StickElectricOverlay";
+import { StickSparkOverlay, SPARK_CONTAINER_SCALE } from "./StickSparkOverlay";
 import { RgbBodyCanvas } from "./RgbBodyCanvas";
 import { WATERMARK_DATA_URL } from "../lib/watermarkData";
+import { watermarkCenterY, WATERMARK_LOGO_CENTER_IN_VIDEO } from "../lib/watermarkPosition";
 import { isVideoSkin } from "./SkinPanel";
 
 interface Props {
@@ -15,9 +19,14 @@ interface Props {
   showButtonLabels: boolean;
   editMode?: boolean;
   onOverridesChange?: (o: LayoutOverrides) => void;
+  // Skips the "no controller detected" blur/overlay/status-badge — meant
+  // for a customer just browsing a static design preview on a website
+  // (there's no gamepad to connect and no reason to show testing UI),
+  // not for the OBS-preview/live-testing context this normally serves.
+  hideDisconnectedOverlay?: boolean;
 }
 
-export function ControllerPreview({ config, overrides, showButtonLabels, editMode, onOverridesChange }: Props) {
+export function ControllerPreview({ config, overrides, showButtonLabels, editMode, onOverridesChange, hideDisconnectedOverlay }: Props) {
   const gp = useGamepad();
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -96,9 +105,9 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
       {/* Blur wrapper — blurs all controller content when disconnected */}
       <div style={{
         position: "absolute", inset: 0,
-        filter: !gp.connected && !editMode ? "blur(4px)" : "none",
+        filter: !gp.connected && !editMode && !hideDisconnectedOverlay ? "blur(4px)" : "none",
         transition: "filter 0.4s ease",
-        pointerEvents: !gp.connected && !editMode ? "none" : "auto",
+        pointerEvents: !gp.connected && !editMode && !hideDisconnectedOverlay ? "none" : "auto",
       }}>
       {/* Drop shadow — a standalone silhouette layer rendered BEHIND both the RGB
           glow and the controller art. Previously this was a `filter: drop-shadow()`
@@ -108,7 +117,7 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
           own bottom-most layer keeps it fully independent of the RGB glow. */}
       {config.showShadow && config.controllerSkin && (() => {
         const rad = (config.shadowAngle * Math.PI) / 180;
-        const dist = 16;
+        const dist = config.shadowDistance ?? 16;
         const x = Math.round(Math.sin(rad) * dist);
         const y = Math.round(-Math.cos(rad) * dist);
         const a = config.shadowIntensity;
@@ -215,36 +224,46 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
 
       {/* Animated body effect — masked to the controller skin's silhouette.
           Disabled when a WebM video skin is active (CSS mask-image can't use video). */}
-      {config.bodyEffect !== "none" && config.controllerSkin && !isVideoSkin(config.controllerSkin) && (
-        <BodyEffectOverlay
-          effect={config.bodyEffect}
-          speed={config.bodyEffectSpeed}
-          intensity={config.bodyEffectIntensity}
-          maskUrl={config.controllerSkin}
-          glowColor={(config.bodyEffect === "fire" || config.bodyEffect === "reactiveFire") ? config.fireColor1 : config.pulseGlowColor}
-          fireColor2={config.fireColor2}
-          fireGlowSpeed={config.fireGlowSpeed}
-          fireEmberSpeed={config.fireEmberSpeed}
-          reactiveColor={config.reactiveRippleColor}
-          reactiveRainbow={config.reactiveRippleRainbow}
-          pressedButtons={["reactive","reactiveReverse","particleBurst","reactiveFire"].includes(config.bodyEffect) ? new Set(
-            gp.buttons.map((pressed, i) => pressed ? i : -1).filter(i => i >= 0)
-          ) : undefined}
-          buttonPositions={["reactive","reactiveReverse","particleBurst","reactiveFire"].includes(config.bodyEffect) ? (() => {
-            const pos: Record<number, { x:number; y:number; size:number; shape:string; maskSw?:number; maskSh?:number; skinAspect?:number }> = {};
-            const skinAspect = baseLayout.skinHeight / baseLayout.skinWidth;
-            buttons.forEach(b => {
-              const mask = baseLayout.buttonMasks?.[b.index];
-              pos[b.index] = {
-                x: b.x, y: b.y, size: b.size, shape: b.shape,
-                ...(b.shape === "rect" && mask ? { maskSw: mask.sw, maskSh: mask.sh, skinAspect } : {}),
-              };
-            });
-            sticks.forEach(s => { pos[s.pressBtn] = { x: s.x, y: s.y, size: s.size, shape: "circle" }; });
-            return pos;
-          })() : undefined}
-        />
-      )}
+      {(config.bodyEffectPulseGlowEnabled || config.bodyEffectParticlesEnabled || config.bodyEffectFireEnabled || config.bodyEffectReactiveEnabled || config.bodyEffectReactiveFireEnabled || config.bodyEffectParticleBurstEnabled) && config.controllerSkin && !isVideoSkin(config.controllerSkin) && (() => {
+        const needsButtonTracking = config.bodyEffectReactiveEnabled || config.bodyEffectParticleBurstEnabled || config.bodyEffectReactiveFireEnabled;
+        return (
+          <BodyEffectOverlay
+            pulseGlowEnabled={config.bodyEffectPulseGlowEnabled}
+            particlesEnabled={config.bodyEffectParticlesEnabled}
+            fireEnabled={config.bodyEffectFireEnabled}
+            reactiveEnabled={config.bodyEffectReactiveEnabled}
+            reactiveFireEnabled={config.bodyEffectReactiveFireEnabled}
+            particleBurstEnabled={config.bodyEffectParticleBurstEnabled}
+            speed={config.bodyEffectSpeed}
+            intensity={config.bodyEffectIntensity}
+            maskUrl={config.controllerSkin}
+            glowColor={(config.bodyEffectFireEnabled || config.bodyEffectReactiveFireEnabled) ? config.fireColor1 : config.pulseGlowColor}
+            fireColor2={config.fireColor2}
+            fireGlowSpeed={config.fireGlowSpeed}
+            fireEmberSpeed={config.fireEmberSpeed}
+            reactiveColor={config.reactiveRippleColor}
+            reactiveRainbow={config.reactiveRippleRainbow}
+            particlesColor={config.particlesColor}
+            particlesRainbow={config.particlesRainbow}
+            pressedButtons={needsButtonTracking ? new Set(
+              gp.buttons.map((pressed, i) => pressed ? i : -1).filter(i => i >= 0)
+            ) : undefined}
+            buttonPositions={needsButtonTracking ? (() => {
+              const pos: Record<number, { x:number; y:number; size:number; shape:string; maskSw?:number; maskSh?:number; skinAspect?:number }> = {};
+              const skinAspect = baseLayout.skinHeight / baseLayout.skinWidth;
+              buttons.forEach(b => {
+                const mask = baseLayout.buttonMasks?.[b.index];
+                pos[b.index] = {
+                  x: b.x, y: b.y, size: b.size, shape: b.shape,
+                  ...(b.shape === "rect" && mask ? { maskSw: mask.sw, maskSh: mask.sh, skinAspect } : {}),
+                };
+              });
+              sticks.forEach(s => { pos[s.pressBtn] = { x: s.x, y: s.y, size: s.size, shape: "circle" }; });
+              return pos;
+            })() : undefined}
+          />
+        );
+      })()}
 
       {/* Button overlays - DEBUG: always visible in edit mode */}
       {buttons.map((btn) => {
@@ -265,28 +284,108 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
           activeOpacity = pressed ? config.buttonOpacity : 0;
         }
 
-        const effectiveColor = config.usePerButtonColors
-          ? (baseLayout.buttonColors[btn.index] ?? config.buttonColor)
-          : config.buttonColor;
+        // Press effect for all face/action buttons (thumbsticks have their
+        // own separate press glow in the sticks.map block below, untouched):
+        // crisp colored ring (a genuine hole via mask-composite, not
+        // something covered by a dark layer) + a soft outside-only glow
+        // that's ALSO built from a hollow shape, so the center stays truly
+        // transparent. No bevel/shadow fill at all — purely ring + glow +
+        // squish, nothing painted in the middle.
+        const isTouchpadTest = true;
+        const testActive = isTouchpadTest && !editMode && activeOpacity > 0.01;
+        // 0-1 fraction of "how pressed" this is right now — for triggers
+        // this is the actual analog pull (tv), for regular buttons it's
+        // just 1 whenever pressed. Used to scale every layer's own alpha
+        // directly (not via a CSS `opacity` on an ancestor of the filtered
+        // glow, which re-triggers the ancestor-opacity-clips-filter-overflow
+        // bug found earlier), so triggers fade the effect in gradually with
+        // pressure instead of snapping to full intensity the instant they
+        // cross the activation threshold.
+        const pressAmt = testActive && config.buttonOpacity > 0 ? Math.min(1, activeOpacity / config.buttonOpacity) : 0;
+        // Separate intensity control for the glow/ring itself, independent
+        // from buttonOpacity (which only drives the Fill layer + how much
+        // pressure a trigger needs before the effect starts fading in).
+        const colorAmt = pressAmt * (config.buttonColorOpacity ?? 1);
+        // Separate multiplier for the glow's own bloom layers only (not the
+        // ring's own color, which stays governed by colorAmt above) — lets
+        // the glow read as bright/soft or dim/tight independent of how
+        // visible the ring itself is.
+        const glowAmt = colorAmt * (config.buttonGlowIntensity ?? 1);
+
+        // Glow always tints off a single representative color per mode —
+        // the per-button color map only applies to Solid (Two-tone is
+        // uniform across all buttons, driven by its own dedicated colors).
+        const effectiveColor = config.buttonColorMode === "twoTone"
+          ? config.buttonColorInner
+          : (config.usePerButtonColors ? (baseLayout.buttonColors[btn.index] ?? config.buttonColor) : config.buttonColor);
 
         // Height for pill/rect shapes
         const hPct = btn.shape === "pill-h" || btn.shape === "rect" ? btn.size * 0.45 : btn.size;
 
-        // Inner fade: for mask buttons the shape is centred in the element, so gradient at 50%/50%
-        const gradCx = maskDef ? 50 : 50;
-        const gradCy = maskDef ? 50 : 50;
-        const bg = config.innerFade
-          ? `radial-gradient(circle at ${gradCx}% ${gradCy}%, ${effectiveColor} 0%, ${hexToRgba(effectiveColor, 0.5)} 45%, transparent 100%)`
+        // Two-tone: solid color at center radiating out to a second solid
+        // color at the edge.
+        const gradCx = 50;
+        const gradCy = 50;
+        const bg = config.buttonColorMode === "twoTone"
+          ? `radial-gradient(circle at ${gradCx}% ${gradCy}%, ${config.buttonColorInner} 0%, ${config.buttonColorOuter} 100%)`
           : effectiveColor;
 
-        const outerGlowFilter = config.outerFade
-          ? ` drop-shadow(0 0 ${config.glowSize * 2}px ${hexToRgba(effectiveColor, 0.35)})`
-          : "";
-        const innerFadeFilter = config.innerFade
-          ? ` brightness(1.25)`
-          : "";
-        const glowFilter = (!editMode && config.glowEnabled && activeOpacity > 0.01)
-          ? `drop-shadow(0 0 ${config.glowSize}px ${hexToRgba(effectiveColor, 0.9)})${outerGlowFilter}${innerFadeFilter}`
+        const glowFilter = (!editMode && config.glowEnabled && activeOpacity > 0.01 && !isTouchpadTest)
+          ? `drop-shadow(0 0 ${config.glowSize}px ${hexToRgba(effectiveColor, 0.9)})`
+          : "none";
+
+        // Geometric (non-masked) fallback only — plain box-shadow, since
+        // there's no real mask silhouette to follow anyway. Alpha ratios
+        // match the thumbstick's own pressBoxShadow recipe exactly (0.9 /
+        // 1.0 / 0.6 / 0.3), not an approximation of it.
+        const testGlowShadow = testActive
+          ? `0 0 4px 2px rgba(255,255,255,${0.9 * glowAmt}), `
+            + `0 0 ${config.glowSize * 0.6}px ${config.glowSize * 0.6}px ${hexToRgba(effectiveColor, glowAmt)}, `
+            + `0 0 ${config.glowSize * 1.4}px ${config.glowSize * 1.4}px ${hexToRgba(effectiveColor, 0.6 * glowAmt)}, `
+            + `0 0 ${config.glowSize * 2.4}px ${config.glowSize * 2}px ${hexToRgba(effectiveColor, 0.3 * glowAmt)}, `
+            + `3px 5px 6px rgba(0,0,0,${0.55 * pressAmt})`
+          : "none";
+
+        // For masked buttons: a ring that follows the button's REAL
+        // photographed silhouette (not a border-radius approximation),
+        // using mask-composite with a FIXED PIXEL gap (calc(100% - Npx), not
+        // a percentage) — that's what keeps it uniform-width regardless of
+        // aspect ratio, exactly like a real border would be, instead of the
+        // percentage-scaled version that came out thick on the touchpad's
+        // long edges. The glow itself is stacked drop-shadow filters (not
+        // box-shadow) on an UNMASKED outer wrapper around this masked ring,
+        // since drop-shadow follows true alpha shape and box-shadow can't
+        // (and filter+mask on the same element clips the blur to nothing —
+        // confirmed earlier). The ring itself being hollow (not a filled
+        // disc) means there's no solid fill left to show through in the
+        // center at all, so no covering/darkening layer is needed either.
+        // Same 4 layers as testGlowShadow above, just converted from
+        // box-shadow's blur+spread to drop-shadow's blur-only (no spread
+        // parameter exists for drop-shadow) — each blur here is set to the
+        // ORIGINAL blur+spread combined, so the visual reach/brightness at
+        // each layer matches the approved box-shadow version exactly, not a
+        // new recipe.
+        // The approved box-shadow version has NO hard edge anywhere at all —
+        // even its tightest layer (blur 4px) is already soft, because
+        // box-shadow doesn't paint a separate solid foreground shape at all
+        // (background stays "transparent"; only the shadow itself is ever
+        // visible). drop-shadow can't do that — it always paints the
+        // original (unblurred) source on top of its own shadow — so this
+        // ring showed up as a hard opaque edge no matter how thin, which
+        // never existed in the approved look. Fix: blur the ring's own
+        // foreground too (not just add shadow layers behind it), so there's
+        // no crisp edge left anywhere, matching the fully-soft aesthetic.
+        // Same alpha ratios as testGlowShadow / the thumbstick's own
+        // pressBoxShadow recipe (0.9 / 1.0 / 0.6 / 0.3) — exact match, not
+        // an approximation.
+        // Thicker ring (more "mass" for the blur to melt into, instead of a
+        // thin line that stays visible as a distinct thread no matter how
+        // blurred) plus much tighter blur radii — the previous 1.2x/2.8x/4.4x
+        // glowSize spread way further than the thumbstick's own contained
+        // glow ever does. Kept the same 0.9/1.0/0.6/0.3 alpha ratios.
+        const ringGapPx = 6;
+        const testDropGlow = testActive
+          ? `blur(4px) drop-shadow(0 0 4px rgba(255,255,255,${0.9 * glowAmt})) drop-shadow(0 0 ${config.glowSize * 0.4}px ${hexToRgba(effectiveColor, glowAmt)}) drop-shadow(0 0 ${config.glowSize * 0.8}px ${hexToRgba(effectiveColor, 0.6 * glowAmt)}) drop-shadow(0 0 ${config.glowSize * 1.2}px ${hexToRgba(effectiveColor, 0.3 * glowAmt)}) drop-shadow(3px 5px 6px rgba(0,0,0,${0.55 * pressAmt}))`
           : "none";
 
         const transitionProp = editMode
@@ -341,9 +440,15 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
               width: `${finalW}%`,
               height: `${finalH}%`,
               transform: "translate(-50%, -50%)",
-              opacity: activeOpacity,
+              // An ancestor with opacity < 1 clips a descendant filter's
+              // blur overflow to that ancestor's own box in this engine
+              // (confirmed against the thumbstick's own working glow, whose
+              // wrapper has no opacity set at all). Keeping this root at
+              // opacity:1 for the touchpad test and pushing the fade-in
+              // onto the stroke layer individually instead.
+              opacity: isTouchpadTest ? 1 : activeOpacity,
               filter: glowFilter,
-              transition: transitionProp,
+              transition: isTouchpadTest ? "opacity 0.04s, filter 0.04s, transform 0.06s cubic-bezier(0.4,0,0.2,1)" : transitionProp,
             }}
           >
             {/* Stroke layer: slightly enlarged duplicate mask behind, creates a smooth outline */}
@@ -354,18 +459,102 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
                   inset: `-${config.strokeWidth}px`,
                   borderRadius: maskDef ? undefined : borderRadius,
                   background: config.strokeColor || "#ffffff",
+                  opacity: isTouchpadTest ? activeOpacity : undefined,
                   ...mStyle,
                 }}
               />
             )}
-            <div
-              className="absolute inset-0"
-              style={{
-                borderRadius: maskDef ? undefined : borderRadius,
-                background: bg,
-                ...mStyle,
-              }}
-            />
+            {isTouchpadTest && testActive && (
+              /* Same dark translucent shade as the keyboard key press
+                 (MkbView.tsx: background rgba(0,0,0,0.5)) — a plain, single
+                 mask fill sized to the button's TRUE shape, no filter/blur
+                 involved at all, so there's no bleed concern here the way
+                 there was for the glow. */
+              <div
+                className="absolute inset-0"
+                style={{
+                  borderRadius: maskDef ? undefined : borderRadius,
+                  background: `rgba(0,0,0,${0.5 * pressAmt})`,
+                  ...mStyle,
+                }}
+              />
+            )}
+            {isTouchpadTest ? (
+              testActive && (
+                maskDef ? (
+                  /* Ring follows the button's REAL photographed mask shape
+                     (not a border-radius approximation), with a fixed-pixel
+                     (not percentage) gap so it stays uniform-width regardless
+                     of aspect ratio. Filter lives on the unmasked middle div;
+                     the mask (and its composite hole) lives on the INNER
+                     child — putting filter and mask-image on the same
+                     element clips the blur to nothing in this engine.
+
+                     The blur() added for softness spreads both directions,
+                     so it was bleeding a bit of color inward past the ring
+                     into the button's real face too. Fixed with an OUTER
+                     cutout mask: opaque everywhere (including generously
+                     past the button's own edges, so the outward glow is
+                     untouched) EXCEPT a hole exactly the size of the
+                     button's true, unenlarged shape — punching out anything
+                     that would've painted inside the real face. This outer
+                     mask has no filter of its own, so it isn't subject to
+                     the filter+mask-same-element bug either. */
+                  <div
+                    className="absolute"
+                    style={{
+                      inset: "-160px",
+                      WebkitMaskImage: `linear-gradient(black, black), url(${croppedUrl})`,
+                      maskImage: `linear-gradient(black, black), url(${croppedUrl})`,
+                      WebkitMaskSize: "800px 800px, calc(100% - 320px) calc(100% - 320px)",
+                      maskSize: "800px 800px, calc(100% - 320px) calc(100% - 320px)",
+                      WebkitMaskPosition: "center, center",
+                      maskPosition: "center, center",
+                      WebkitMaskRepeat: "no-repeat, no-repeat",
+                      maskRepeat: "no-repeat, no-repeat",
+                      WebkitMaskComposite: "destination-out",
+                      maskComposite: "exclude",
+                    }}
+                  >
+                    <div className="absolute" style={{ inset: "160px", filter: testDropGlow }}>
+                      <div
+                        className="absolute inset-0"
+                        style={{
+                          background: hexToRgba(effectiveColor, colorAmt),
+                          WebkitMaskImage: `url(${croppedUrl}), url(${croppedUrl})`,
+                          maskImage: `url(${croppedUrl}), url(${croppedUrl})`,
+                          WebkitMaskSize: `100% 100%, calc(100% - ${ringGapPx * 2}px) calc(100% - ${ringGapPx * 2}px)`,
+                          maskSize: `100% 100%, calc(100% - ${ringGapPx * 2}px) calc(100% - ${ringGapPx * 2}px)`,
+                          WebkitMaskPosition: "center, center",
+                          maskPosition: "center, center",
+                          WebkitMaskRepeat: "no-repeat, no-repeat",
+                          maskRepeat: "no-repeat, no-repeat",
+                          WebkitMaskComposite: "destination-out",
+                          maskComposite: "exclude",
+                        }}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  /* Geometric fallback — no real mask to follow, so a plain
+                     box-shadow glow on a border-radius shape is the simplest
+                     equivalent. */
+                  <div
+                    className="absolute inset-0"
+                    style={{ borderRadius, background: "transparent", boxShadow: testGlowShadow }}
+                  />
+                )
+              )
+            ) : (
+              <div
+                className="absolute inset-0"
+                style={{
+                  borderRadius: maskDef ? undefined : borderRadius,
+                  background: bg,
+                  ...mStyle,
+                }}
+              />
+            )}
             {/* Label only shown for geometric (non-mask) buttons when labels are on */}
             {showButtonLabels && !maskDef && (
               <span
@@ -396,9 +585,11 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
         const tiltX = -ay * tiltAmount; // tilt forward/back
         const tiltY = ax * tiltAmount;  // tilt left/right
 
-        // Press glow — layered box-shadow on its own sibling div, fully isolated
-        // from the drop shadow. Intensity controls opacity of each layer; size
-        // controls spread distance — both scale together for a real glow look.
+        // Press glow — layered box-shadow, same exact recipe as before.
+        // Lives INSIDE the tilting/3D-rotated group as a plain child (no
+        // transform of its own — it just inherits the parent's rotateX/
+        // rotateY like the drop shadow above it does), so it tilts with the
+        // stick without changing its look at all.
         const glowSize = config.stickGlowSize ?? 8;
         const glowInt = config.stickGlowEnabled ? (config.stickGlowIntensity ?? 0.85) : 0;
         const pressBoxShadow = pressed
@@ -466,11 +657,75 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
                 );
               })()}
 
-              {/* Layer 4 — press glow (z 10). Completely independent sibling; uses box-shadow
-                  not filter, so the drop shadow below cannot affect it in any way. */}
+              {/* Layer 4 — press glow, same box-shadow recipe as before, now
+                  living INSIDE the tilting div (as a plain child with no
+                  transform of its own) so it tilts along with the stick.
+                  NOTE: z-index must be a plain integer — a fractional value
+                  here (2.5) is invalid per the CSS spec and gets silently
+                  dropped by the browser, which is what broke the stacking
+                  order the first time around. */}
               {pressed && (
-                <div style={{ position: "absolute", inset: 0, borderRadius: "50%", pointerEvents: "none", zIndex: 10, boxShadow: pressBoxShadow }} />
+                <div style={{ position: "absolute", inset: 0, borderRadius: "50%", pointerEvents: "none", zIndex: 3, boxShadow: pressBoxShadow }} />
               )}
+
+              {/* Layer 5 — press darken, same dark translucent shade the face
+                  buttons get when pressed. Rendered ABOVE the glow (not
+                  below it) — the glow's box-shadow renders as a mostly solid
+                  blurred disc covering the whole face (unlike the face
+                  buttons' hollow-ring glow), so putting the darken underneath
+                  it made the dim invisible, washed out by the glow. */}
+              {pressed && (
+                <div style={{
+                  position: "absolute", inset: 0, borderRadius: "50%", pointerEvents: "none", zIndex: 4,
+                  background: "rgba(0,0,0,0.5)", transition: "background 0.04s ease-out",
+                }} />
+              )}
+
+              {/* Layer 6 — comet LED, revolves around the stick's rim leaving a
+                  fading trail. Independent enable/color/speed per stick. Container
+                  is enlarged (inset -12%, matching COMET_CONTAINER_SCALE) so the
+                  glow can bleed outward past the original rim without clipping. */}
+              {(i === 0 ? config.leftStickCometEnabled : config.rightStickCometEnabled) && (
+                <div style={{ position: "absolute", inset: `-${(COMET_CONTAINER_SCALE - 1) * 50}%`, zIndex: 5, pointerEvents: "none" }}>
+                  <StickCometOverlay
+                    color={i === 0 ? config.leftStickCometColor : config.rightStickCometColor}
+                    speed={i === 0 ? config.leftStickCometSpeed : config.rightStickCometSpeed}
+                    phaseOffset={i === 0 ? 0 : Math.PI}
+                  />
+                </div>
+              )}
+
+              {/* Layer 3.6 — electric current ring + arcing bolts around the
+                  stick's rim. Independent enable/color/speed per stick,
+                  separate from the comet LED (both can run at once).
+                  Container enlarged further than the comet's (bolts jump out
+                  much further than the comet's own trail ever did). */}
+              {(i === 0 ? config.leftStickElectricEnabled : config.rightStickElectricEnabled) && (
+                <div style={{ position: "absolute", inset: `-${(ELECTRIC_CONTAINER_SCALE - 1) * 50}%`, zIndex: 6, pointerEvents: "none" }}>
+                  <StickElectricOverlay
+                    color={i === 0 ? config.leftStickElectricColor : config.rightStickElectricColor}
+                    speed={i === 0 ? config.leftStickElectricSpeed : config.rightStickElectricSpeed}
+                    phaseOffset={i === 0 ? 0 : Math.PI}
+                  />
+                </div>
+              )}
+
+              {/* Layer 3.7 — spark: comet-style revolving head/trail that
+                  also flings off sparks as it travels around the rim, like
+                  a portal ring. Independent enable/color/speed per stick,
+                  separate from the comet LED and electric (all three can
+                  run at once). Container enlarged a bit more than the plain
+                  comet's own margin since sparks fly outward further. */}
+              {(i === 0 ? config.leftStickSparkEnabled : config.rightStickSparkEnabled) && (
+                <div style={{ position: "absolute", inset: `-${(SPARK_CONTAINER_SCALE - 1) * 50}%`, zIndex: 7, pointerEvents: "none" }}>
+                  <StickSparkOverlay
+                    color={i === 0 ? config.leftStickSparkColor : config.rightStickSparkColor}
+                    speed={i === 0 ? config.leftStickSparkSpeed : config.rightStickSparkSpeed}
+                    phaseOffset={i === 0 ? 0 : Math.PI}
+                  />
+                </div>
+              )}
+
             </div>
           </div>
         );
@@ -491,7 +746,7 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
       )}
 
       {/* Connection status badge (preview only) */}
-      {!editMode && (
+      {!editMode && !hideDisconnectedOverlay && (
         <div
           className={`absolute top-2 right-2 text-[9px] font-mono px-2 py-0.5 rounded-full border transition-all ${
             gp.connected
@@ -514,7 +769,7 @@ export function ControllerPreview({ config, overrides, showButtonLabels, editMod
       )}
       </div>{/* end blur wrapper */}
 
-      {!gp.connected && !editMode && (
+      {!gp.connected && !editMode && !hideDisconnectedOverlay && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div style={{
             background: "rgba(10,10,14,0.85)",
@@ -550,15 +805,30 @@ function WatermarkOverlay({ controllerType }: { controllerType: ControllerType }
     if (!vid) return;
 
     let timer: ReturnType<typeof setTimeout>;
+    let fadeTimer: ReturnType<typeof setTimeout>;
+
+    // The clip plays all the way through and holds on the finished logo. After
+    // that hold, fade it out instead of leaving it up until the next replay.
+    // The replay still starts 10s after the clip ends. Keep in sync with
+    // exportHtml.ts.
+    const HOLD_MS = 2500;   // finished logo stays fully visible this long
+    const FADE_SECONDS = 1; // then fades out over this long
 
     function playOnce() {
+      clearTimeout(fadeTimer);
+      vid!.style.transition = "none";
+      vid!.style.opacity = "1";
       vid!.currentTime = 0;
       vid!.play();
     }
 
     vid.onended = () => {
-      // Wait 45 seconds after the video ends before playing again
-      timer = setTimeout(playOnce, 15000);
+      fadeTimer = setTimeout(() => {
+        vid.style.transition = `opacity ${FADE_SECONDS}s ease-in-out`;
+        vid.style.opacity = "0";
+      }, HOLD_MS);
+      // Wait 10 seconds after the video ends before playing again
+      timer = setTimeout(playOnce, 10000);
     };
 
     // Start first play
@@ -566,6 +836,7 @@ function WatermarkOverlay({ controllerType }: { controllerType: ControllerType }
 
     return () => {
       clearTimeout(timer);
+      clearTimeout(fadeTimer);
       vid.onended = null;
     };
   }, []);
@@ -573,10 +844,9 @@ function WatermarkOverlay({ controllerType }: { controllerType: ControllerType }
   // Each controller body sits a little differently in frame, so the
   // watermark's vertical position is tuned per controller type rather than
   // using one fixed value for all of them.
-  const watermarkTop =
-    controllerType === "c4d1" || controllerType === "c4d1-edge" ? "12%"
-    : controllerType === "c4d4" ? "7%"
-    : "3%";
+  // (See lib/watermarkPosition.ts — the target is the logo's center, as a %
+  // of the controller frame's height.)
+  const watermarkTop = `${watermarkCenterY(controllerType)}%`;
 
   return (
     <video
@@ -588,8 +858,12 @@ function WatermarkOverlay({ controllerType }: { controllerType: ControllerType }
         position: "absolute",
         top: watermarkTop,
         left: "50%",
-        transform: "translateX(-50%)",
-        width: "102%",
+        // `top` is where the LOGO's center goes; the logo sits at
+        // WATERMARK_LOGO_CENTER_IN_VIDEO% of the video's own height, so shift
+        // the video up by that much. Tuned for the 1920x852 logo animation —
+        // redo if the video's shape changes.
+        transform: `translate(-50%, -${WATERMARK_LOGO_CENTER_IN_VIDEO}%)`,
+        width: "50%",
         pointerEvents: "none",
       }}
     />

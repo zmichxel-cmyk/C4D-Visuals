@@ -5,7 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // anything more powerful than it needs.
 contextBridge.exposeInMainWorld('electronAPI', {
   libraryLoad:   (section) => ipcRenderer.invoke('library:load', section),
-  libraryAdd:    (section, name, dataUrl) => ipcRenderer.invoke('library:add', section, name, dataUrl),
+  libraryAdd:    (section, name, dataUrl, extra) => ipcRenderer.invoke('library:add', section, name, dataUrl, extra),
   libraryRemove: (section, id) => ipcRenderer.invoke('library:remove', section, id),
   presetsLoad:   (kind) => ipcRenderer.invoke('presets:load', kind),
   presetsSave:   (kind, presets) => ipcRenderer.invoke('presets:save', kind, presets),

@@ -65,7 +65,6 @@ function createWindow() {
     });
   } else {
     win.loadFile(path.join(__dirname, 'dist', 'public', 'index.html'));
-    win.webContents.openDevTools(); // TEMPORARY — for diagnosing the blank-window issue, remove once resolved
   }
 }
 
@@ -112,7 +111,14 @@ ipcMain.handle('library:load', async (_event, section) => {
     try {
       const bytes = await fs.readFile(path.join(dir, item.filename));
       const ext = path.extname(item.filename).slice(1) || 'png';
-      entries.push({ id: item.id, name: item.name, url: `data:image/${ext};base64,${bytes.toString('base64')}` });
+      entries.push({
+        id: item.id, name: item.name, url: `data:image/${ext};base64,${bytes.toString('base64')}`,
+        // Bezel placement metadata (controller-body entries only) — see the
+        // matching comment on library:add below for why this exists.
+        ...(item.bezelSlots ? { bezelSlots: item.bezelSlots } : {}),
+        ...(item.baseSkinNoBezels ? { baseSkinNoBezels: item.baseSkinNoBezels } : {}),
+        ...(item.homeButtonZone ? { homeButtonZone: item.homeButtonZone } : {}),
+      });
     } catch {
       // File missing on disk (manually deleted, etc.) — skip it rather than
       // fail the whole library load over one bad entry.
@@ -121,7 +127,7 @@ ipcMain.handle('library:load', async (_event, section) => {
   return entries;
 });
 
-ipcMain.handle('library:add', async (_event, section, name, dataUrl) => {
+ipcMain.handle('library:add', async (_event, section, name, dataUrl, extra) => {
   const decoded = dataUrlToBuffer(dataUrl);
   if (!decoded) return null;
   const dir = libraryDir(section);
@@ -132,9 +138,18 @@ ipcMain.handle('library:add', async (_event, section, name, dataUrl) => {
     const filename = `${id}.${ext}`;
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, filename), decoded.buffer);
-    manifest.push({ id, name, filename });
+    // extra.bezelSlots/baseSkinNoBezels — when a controller-body entry gets
+    // baked with bezels placed, the image alone can't tell a customer editor
+    // WHERE those bezels are or what material they used, so that metadata
+    // has to ride alongside the entry itself, same as it does on a saved
+    // preset's config.
+    const manifestEntry = { id, name, filename };
+    if (extra && extra.bezelSlots) manifestEntry.bezelSlots = extra.bezelSlots;
+    if (extra && extra.baseSkinNoBezels) manifestEntry.baseSkinNoBezels = extra.baseSkinNoBezels;
+    if (extra && extra.homeButtonZone) manifestEntry.homeButtonZone = extra.homeButtonZone;
+    manifest.push(manifestEntry);
     await writeManifest(dir, manifest);
-    return { id, name, url: dataUrl };
+    return { id, name, url: dataUrl, ...(extra || {}) };
   } catch (err) {
     console.error('library:add failed', err);
     return null;

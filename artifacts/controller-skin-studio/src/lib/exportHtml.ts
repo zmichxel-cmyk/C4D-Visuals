@@ -1,6 +1,7 @@
 import { ControllerConfig, LayoutOverrides } from "../types/config";
 import { LAYOUTS } from "./layouts";
 import { WATERMARK_DATA_URL } from "./watermarkData";
+import { watermarkCenterY, WATERMARK_LOGO_CENTER_IN_VIDEO } from "./watermarkPosition";
 
 const DEAD_ZONE = 0.06;
 
@@ -136,7 +137,7 @@ function renameIdentifiers(src: string, renameMap: Record<string, string>): stri
 // IIFEs for different purposes and must NOT be renamed via this map).
 const EXPORT_FN_RENAME_MAP: Record<string, string> = {
   hexToRgba: "_hrgba",
-  innerFadeBg: "_ifbg",
+  twoToneBg: "_ttbg",
   dead: "_dz",
   applyBtn: "_abtn",
   applyStickTilt: "_astk",
@@ -145,6 +146,29 @@ const EXPORT_FN_RENAME_MAP: Record<string, string> = {
 
 function obfuscateScript(js: string): string {
   return minifyJs(renameIdentifiers(js, EXPORT_FN_RENAME_MAP));
+}
+
+// Build-time hex+alpha → rgba() string, for baking STATIC (non-gamepad-
+// reactive) colors directly into generated CSS — e.g. the thumbstick rim
+// highlight/drop shadow, which never change at runtime, unlike button/stick
+// press colors which are computed in the export's own runtime JS instead.
+function hexToRgbaStatic(hex: string, a: number): string {
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+// Build-time hex → [hue, saturation%, lightness%] — mirrors
+// BodyEffectOverlay.tsx's hexToHsl exactly (same fallback [270,80,55] for an
+// invalid/missing hex). Used to bake the Fire glow's actual color (not a
+// hardcoded 90%/50% stand-in) into the export.
+function hexToHslStatic(hex: string): [number, number, number] {
+  if (!hex.startsWith("#") || hex.length !== 7) return [270, 80, 55];
+  const r = parseInt(hex.slice(1, 3), 16) / 255, g = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+  if (max === min) return [0, 0, l * 100];
+  const d = max - min, s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, s * 100, l * 100];
 }
 
 export async function generateExportHtml(config: ControllerConfig, overrides: LayoutOverrides): Promise<string> {
@@ -200,17 +224,30 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
   ]);
 
   const MAX_OP = config.buttonOpacity;
+  const BTN_COLOR_OPACITY = config.buttonColorOpacity ?? 1;
+  const BTN_GLOW_INTENSITY = config.buttonGlowIntensity ?? 1;
   const GLOW = config.glowEnabled;
   const GLOW_SIZE = config.glowSize;
-  const INNER_FADE = config.innerFade;
-  const OUTER_FADE = config.outerFade;
+  const BTN_MODE = config.buttonColorMode;
+  const INNER_COLOR = config.buttonColorInner;
+  const OUTER_COLOR = config.buttonColorOuter;
   const STROKE_ENABLED = config.strokeEnabled;
   const STROKE_WIDTH = config.strokeWidth;
   const STROKE_COLOR = config.strokeColor;
   const PER_BTN = config.usePerButtonColors;
   const DEF_COLOR = config.buttonColor;
   const TRAVEL = config.stickTravel * (EXPORT_W / 1280);
-  const BODY_EFFECT = config.bodyEffect;
+  // Body effects — independent toggles (not mutually exclusive), same
+  // pattern as the thumbstick effects, so any combination can run at once.
+  const BODY_EFFECTS_ENABLED: { id: string; enabled: boolean }[] = [
+    { id: "pulseGlow", enabled: config.bodyEffectPulseGlowEnabled },
+    { id: "particles", enabled: config.bodyEffectParticlesEnabled },
+    { id: "fire", enabled: config.bodyEffectFireEnabled },
+    { id: "reactive", enabled: config.bodyEffectReactiveEnabled },
+    { id: "reactiveFire", enabled: config.bodyEffectReactiveFireEnabled },
+    { id: "particleBurst", enabled: config.bodyEffectParticleBurstEnabled },
+  ];
+  const ANY_BODY_EFFECT = BODY_EFFECTS_ENABLED.some(e => e.enabled);
   const BODY_EFFECT_SPEED = config.bodyEffectSpeed;
   const BODY_EFFECT_INTENSITY = config.bodyEffectIntensity;
   const RGB_BODY_ENABLED = config.rgbBodyEnabled && !!rgbBodyMaskDataUrl;
@@ -246,10 +283,22 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
     btnPositionsForEffects[s.pressBtn] = { x: s.x, y: s.y, size: s.size, shape: "circle" };
   });
 
-  // ── Per-button CSS — mirrors ControllerPreview.tsx exactly ───────────────
+  // ── Per-button CSS — mirrors ControllerPreview.tsx's CURRENT button system
+  //    exactly (isTouchpadTest is permanently true there — this is not the
+  //    older solid-fill model). Each pressed button is a genuinely hollow
+  //    ring (via mask-composite exclude, real photographed silhouette for
+  //    masked buttons) plus a soft outside-only glow, a separate dark
+  //    press-tint layer, and an optional Fill/stroke outline — nothing is
+  //    ever painted solid across the button's own face. --c carries
+  //    whichever color the ring/glow tints off (two-tone uses its Inner
+  //    color only — the two-tone gradient itself is dead code in the live
+  //    preview since isTouchpadTest never takes that branch, so it's
+  //    intentionally not reproduced here either).
+  const RING_GAP_PX = 6;
   const btnCss = buttons.map((btn) => {
     const maskDef = baseLayout.buttonMasks[btn.index];
-    const color = PER_BTN ? (baseLayout.buttonColors[btn.index] ?? DEF_COLOR) : DEF_COLOR;
+    const color = BTN_MODE === "twoTone" ? INNER_COLOR
+      : (PER_BTN ? (baseLayout.buttonColors[btn.index] ?? DEF_COLOR) : DEF_COLOR);
     const maskUrl = maskDataUrls[btn.index];
 
     const hPct = btn.shape === "pill-h" || btn.shape === "rect" ? btn.size * 0.45 : btn.size;
@@ -267,6 +316,16 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
     const finalW = btnOverride?.size !== undefined ? btnOverride.size : natW;
     const finalH = natH * (finalW / natW);
 
+    const wrapRule = `
+  [data-wrap="${btn.index}"] {
+    left: ${posX}%; top: ${posY}%;
+    width: ${finalW}%; height: ${finalH}%;
+    transform: translate(-50%,-50%);
+    position: absolute;
+    --c: ${color};
+    --c2: ${OUTER_COLOR};
+  }`;
+
     if (maskUrl) {
       const strokeRule = STROKE_ENABLED ? `
   [data-stroke="${btn.index}"] {
@@ -282,20 +341,18 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
     -webkit-mask-repeat: no-repeat;
     mask-repeat: no-repeat;
   }` : "";
-      return `
-  [data-wrap="${btn.index}"] {
-    left: ${posX}%; top: ${posY}%;
-    width: ${finalW}%; height: ${finalH}%;
-    transform: translate(-50%,-50%);
-    position: absolute;
-  }
-  [data-btn="${btn.index}"] {
-    --c: ${color};
-    --cx: 50%;
-    --cy: 50%;
+      // Ring: fixed-pixel gap (not a percentage) so the ring stays
+      // uniform-width regardless of the button's aspect ratio — mirrors
+      // ControllerPreview.tsx's ringGapPx exactly. The outer cutout mask
+      // punches a hole exactly the button's true (unenlarged) shape out of
+      // an otherwise-opaque, generously-oversized box, so the glow's own
+      // blur bleed never paints inside the real face; the mid layer holds
+      // the actual filter (drop-shadow stack) since filter+mask-image on
+      // the same element clips the blur to nothing in this engine.
+      return `${wrapRule}${strokeRule}
+  [data-dark="${btn.index}"] {
     position: absolute;
     inset: 0;
-    width: 100%; height: 100%;
     -webkit-mask-image: url("${maskUrl}");
     mask-image: url("${maskUrl}");
     -webkit-mask-size: 100% 100%;
@@ -304,38 +361,76 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
     mask-position: center;
     -webkit-mask-repeat: no-repeat;
     mask-repeat: no-repeat;
-  }${strokeRule}`;
-    }
-
-    // Geometric fallback
-    const radius = btn.shape === "circle" || btn.shape.startsWith("cross")
-      ? "50%" : btn.shape === "rect" ? "8px" : "9999px";
-    return `
-  [data-wrap="${btn.index}"] {
-    left: ${posX}%; top: ${posY}%;
-    width: ${finalW}%; height: ${finalH}%;
-    transform: translate(-50%,-50%);
-    position: absolute;
   }
-  [data-btn="${btn.index}"] {
-    --c: ${color};
-    --cx: 50%;
-    --cy: 50%;
+  [data-ringouter="${btn.index}"] {
+    position: absolute;
+    inset: -160px;
+    -webkit-mask-image: linear-gradient(black, black), url("${maskUrl}");
+    mask-image: linear-gradient(black, black), url("${maskUrl}");
+    -webkit-mask-size: 800px 800px, calc(100% - 320px) calc(100% - 320px);
+    mask-size: 800px 800px, calc(100% - 320px) calc(100% - 320px);
+    -webkit-mask-position: center, center;
+    mask-position: center, center;
+    -webkit-mask-repeat: no-repeat, no-repeat;
+    mask-repeat: no-repeat, no-repeat;
+    -webkit-mask-composite: destination-out;
+    mask-composite: exclude;
+    display: none;
+  }
+  [data-ringmid="${btn.index}"] {
+    position: absolute;
+    inset: 160px;
+  }
+  [data-ring="${btn.index}"] {
     position: absolute;
     inset: 0;
-    width: 100%; height: 100%;
+    -webkit-mask-image: url("${maskUrl}"), url("${maskUrl}");
+    mask-image: url("${maskUrl}"), url("${maskUrl}");
+    -webkit-mask-size: 100% 100%, calc(100% - ${RING_GAP_PX * 2}px) calc(100% - ${RING_GAP_PX * 2}px);
+    mask-size: 100% 100%, calc(100% - ${RING_GAP_PX * 2}px) calc(100% - ${RING_GAP_PX * 2}px);
+    -webkit-mask-position: center, center;
+    mask-position: center, center;
+    -webkit-mask-repeat: no-repeat, no-repeat;
+    mask-repeat: no-repeat, no-repeat;
+    -webkit-mask-composite: destination-out;
+    mask-composite: exclude;
+  }`;
+    }
+
+    // Geometric fallback — no real mask to follow, so a plain box-shadow
+    // glow on a border-radius shape is the simplest equivalent, exactly
+    // like ControllerPreview.tsx's own geometric fallback.
+    const radius = btn.shape === "circle" || btn.shape.startsWith("cross")
+      ? "50%" : btn.shape === "rect" ? "8px" : "9999px";
+    const strokeRuleGeo = STROKE_ENABLED ? `
+  [data-stroke="${btn.index}"] {
+    position: absolute;
+    inset: -${STROKE_WIDTH}px;
+    background: ${STROKE_COLOR};
     border-radius: ${radius};
+  }` : "";
+    return `${wrapRule}${strokeRuleGeo}
+  [data-dark="${btn.index}"] {
+    position: absolute;
+    inset: 0;
+    border-radius: ${radius};
+  }
+  [data-geoglow="${btn.index}"] {
+    position: absolute;
+    inset: 0;
+    border-radius: ${radius};
+    background: transparent;
   }`;
   }).join("");
 
   const isMasked = (idx: number) => !!maskDataUrls[idx];
-  const btnHtml = buttons.map((btn) =>
-    isMasked(btn.index)
-      ? (STROKE_ENABLED
-          ? `<div class="btn-wrap" data-wrap="${btn.index}"><div class="btn-stroke" data-stroke="${btn.index}"></div><div class="btn btn-masked" data-btn="${btn.index}"></div></div>`
-          : `<div class="btn-wrap" data-wrap="${btn.index}"><div class="btn btn-masked" data-btn="${btn.index}"></div></div>`)
-      : `<div class="btn-wrap" data-wrap="${btn.index}"><div class="btn btn-geo" data-btn="${btn.index}"></div></div>`
-  ).join("\n    ");
+  const btnHtml = buttons.map((btn) => {
+    const strokeHtml = STROKE_ENABLED ? `<div class="btn-stroke" data-stroke="${btn.index}"></div>` : "";
+    const glowHtml = isMasked(btn.index)
+      ? `<div class="btn-ring-outer" data-ringouter="${btn.index}"><div class="btn-ring-mid" data-ringmid="${btn.index}"><div class="btn-ring" data-ring="${btn.index}"></div></div></div>`
+      : `<div class="btn-geo-glow" data-geoglow="${btn.index}"></div>`;
+    return `<div class="btn-wrap" data-wrap="${btn.index}">${strokeHtml}<div class="btn-dark" data-dark="${btn.index}"></div>${glowHtml}</div>`;
+  }).join("\n    ");
 
   // Video skins are stored as `data:video/...` (uploaded via FileReader.readAsDataURL)
   // — never `blob:` in practice, since blob: URLs don't survive a reload and get
@@ -361,6 +456,25 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
   const rightStickImg = rightStickDataUrl
     ? `<img src="${rightStickDataUrl}" class="stick-img" id="rstick-img" />`
     : `<div class="stick-fallback" id="rstick-img"></div>`;
+
+  // Stick drop shadow + rim highlight — both fully static (config-driven,
+  // never change at runtime unlike press glow/dark), so baked directly into
+  // inline styles here rather than updated by the export's JS. Mirrors
+  // ControllerPreview.tsx's Layer 1 (shadow) / Layer 3 (highlight) exactly —
+  // previously missing from the export entirely.
+  const stickShadowAngleRad = ((config.stickShadowAngle ?? 135) * Math.PI) / 180;
+  const stickShadowDist = config.stickShadowDistance ?? 10;
+  const stickSdx = Math.sin(stickShadowAngleRad) * stickShadowDist;
+  const stickSdy = Math.cos(stickShadowAngleRad) * stickShadowDist;
+  const stickShadowIntensity = config.stickShadowIntensity ?? 0.65;
+  const stickShadowHtml = (config.stickShadowEnabled ?? true)
+    ? `<div style="position:absolute;inset:0;border-radius:50%;box-shadow:${stickSdx}px ${stickSdy}px ${stickShadowDist * 1.8}px rgba(0,0,0,${stickShadowIntensity}), ${stickSdx * 0.4}px ${stickSdy * 0.4}px ${stickShadowDist * 0.6}px rgba(0,0,0,${Math.min(stickShadowIntensity + 0.15, 1)})"></div>`
+    : "";
+  const stickHighlightColor = config.stickHighlightColor ?? "#ffffff";
+  const stickHighlightIntensity = config.stickHighlightIntensity ?? 0.35;
+  const stickHighlightHtml = (config.stickHighlightEnabled ?? true)
+    ? `<div style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:radial-gradient(circle, transparent 52%, ${hexToRgbaStatic(stickHighlightColor, stickHighlightIntensity * 0.65)} 68%, ${hexToRgbaStatic(stickHighlightColor, stickHighlightIntensity)} 78%, transparent 90%)"></div>`
+    : "";
 
   // Stick press colors — user-configurable per stick, optionally linked
   const lStickColor = config.leftStickColor;
@@ -396,34 +510,38 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
      shadow as its own bottom-most layer keeps it fully independent. */
   .controller-shadow-layer { position:absolute; inset:0; width:100%; height:100%; background:${controllerBg}; pointer-events:none; }
 
-  /* Wrapper: holds position/size; glow filter applied here so masked children don't clip drop-shadow */
+  /* Wrapper: holds position/size only — nothing is ever painted solid across
+     a button's own face, matching ControllerPreview.tsx's current (ring +
+     glow + dark-tint, no fill) button system exactly. */
   .btn-wrap {
     pointer-events:none;
-    transition: filter .04s;
   }
 
-  /* Masked buttons: positioned + sized exactly like ControllerPreview, clipped to cropped mask shape */
-  .btn-masked {
-    pointer-events:none;
-    opacity:0;
-    background:var(--c, ${DEF_COLOR});
-    transition: opacity .04s;
-  }
-
-  /* Geometric fallback buttons */
-  .btn-geo {
-    pointer-events:none;
-    opacity:0;
-    background:var(--c, ${DEF_COLOR});
-    transition: opacity .04s;
-  }
-
-  /* Stroke layer: enlarged duplicate mask behind main button, creates outline */
+  /* Fill/stroke layer: enlarged duplicate mask, the only persistent-color
+     layer — controlled by the Fill toggle + its own opacity, independent of
+     the ring/glow. */
   .btn-stroke {
     pointer-events:none;
     opacity:0;
     transition: opacity .04s;
   }
+
+  /* Dark press-tint layer — same translucent shade as a keyboard key press,
+     sized to the button's true shape. */
+  .btn-dark {
+    pointer-events:none;
+  }
+
+  /* Ring/glow (masked buttons): outer holds the cutout mask (no filter of
+     its own, so it isn't subject to the filter+mask-same-element clipping
+     bug); mid holds the actual drop-shadow filter stack; inner is the
+     hollow ring itself. */
+  .btn-ring-outer { pointer-events:none; }
+  .btn-ring-mid { pointer-events:none; }
+  .btn-ring { pointer-events:none; }
+
+  /* Ring/glow (geometric fallback) — plain box-shadow on a border-radius shape. */
+  .btn-geo-glow { pointer-events:none; }
 
   ${btnCss}
 
@@ -434,9 +552,51 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
   }
   #lstick-wrap { left:${lStick.x}%; top:${lStick.y}%; width:${lStick.size}%; height:${lStick.size * (EXPORT_W / EXPORT_H)}%; }
   #rstick-wrap { left:${rStick.x}%; top:${rStick.y}%; width:${rStick.size}%; height:${rStick.size * (EXPORT_W / EXPORT_H)}%; }
-  .stick-inner { width:100%; height:100%; border-radius:50%; overflow:hidden; transform-style:preserve-3d; transition: transform .04s ease-out, filter .04s; }
+  /* .stick-inner itself is NOT clipped — clipping the stick image to a
+     circle happens one level deeper, in .stick-img-clip, specifically so
+     that comet/electric/spark/press-glow/press-dark can be REAL DOM
+     CHILDREN of .stick-inner (siblings of .stick-img-clip) and still bleed
+     outward past the rim. This matters for more than just clipping: under
+     CSS 3D perspective, rotating a LARGER box by the same rotateX/rotateY
+     angle around the same center as a SMALLER box does NOT perspective-
+     project identically — foreshortening is distance-based, not a plain
+     linear scale, so the two boxes visibly diverge (the ring reads as
+     shifted/ovaled relative to the rim) the more the stick tilts. Nesting
+     the enlarged wrappers as children of the SAME rotated element as the
+     stick image (one rigid transformed subtree, exactly like
+     ControllerPreview.tsx already does) avoids ever needing to apply a
+     second independent copy of the same rotation to a differently-sized
+     box, which is what caused that drift — copying .stick-inner's
+     transform onto separate sibling wrappers, even in perfect sync, was
+     never going to look right at a tilt. */
+  .stick-inner { width:100%; height:100%; border-radius:50%; transform-style:preserve-3d; transition: transform .04s ease-out, filter .04s; }
+  .stick-img-clip { position:absolute; inset:0; border-radius:50%; overflow:hidden; }
   .stick-img,.stick-fallback { width:100%; height:100%; object-fit:cover; border-radius:50%; display:block; }
+  /* Press darken — same dark translucent shade the face buttons get when
+     pressed. Rendered ABOVE the glow (after .stick-press-glow in the
+     markup) since the glow's drop-shadow fills the whole face and would
+     otherwise wash the dim out. */
+  .stick-press-dark { position:absolute; inset:0; border-radius:50%; pointer-events:none; background:rgba(0,0,0,0); transition: background .04s ease-out; }
   .stick-fallback { background:rgba(255,255,255,.12); border:2px solid rgba(255,255,255,.25); box-sizing:border-box; }
+  /* Comet LED wrapper — enlarged 24% beyond the stick's own box so the ring's
+     glow can bleed outward past the rim without being clipped by the canvas
+     bounds. Mirrors ControllerPreview.tsx's inline inset (-12% each side). */
+  .stick-comet-wrap { position:absolute; inset:-12%; pointer-events:none; }
+  .stick-comet-wrap canvas { width:100%; height:100%; display:block; }
+  /* Electric wrapper — enlarged 40% beyond the stick's own box (more room
+     than the comet's since arcing bolts jump further out). Mirrors
+     ControllerPreview.tsx's inline inset (-20% each side). */
+  .stick-electric-wrap { position:absolute; inset:-20%; pointer-events:none; }
+  .stick-electric-wrap canvas { width:100%; height:100%; display:block; }
+  /* Spark wrapper — comet-style head/trail that also flings off sparks as it
+     travels, enlarged a bit more than the plain comet's own margin since
+     sparks fly outward further. Mirrors ControllerPreview.tsx's inline inset
+     (-17.5% each side, matching SPARK_CONTAINER_SCALE = 1.35). */
+  .stick-spark-wrap { position:absolute; inset:-17.5%; pointer-events:none; }
+  .stick-spark-wrap canvas { width:100%; height:100%; display:block; }
+  /* Press glow — layered box-shadow, same recipe as ControllerPreview.tsx's
+     pressBoxShadow, scaled by stickGlowIntensity. */
+  .stick-press-glow { position:absolute; inset:0; border-radius:50%; pointer-events:none; transition: box-shadow .04s; }
 
 
   #disconnected-msg {
@@ -461,8 +621,10 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
   #disconnected-box .title { font-size:${vw(12)}; font-weight:600; color:rgba(255,255,255,0.9); margin:0 0 ${vw(5)}; }
   #disconnected-box .sub { font-size:${vw(10)}; color:rgba(255,255,255,0.45); margin:0; }
 
-  /* Animated body effect — masked to the controller skin's silhouette */
-  #body-effect {
+  /* Animated body effects — masked to the controller skin's silhouette.
+     Class selector (not an id) since multiple effects can now run at once,
+     each in its own stacked div sharing this same styling. */
+  .body-effect {
     position:absolute; inset:0; pointer-events:none; overflow:hidden;
     -webkit-mask-image:${(!isVideoSkin && controllerBg !== "none") ? `url("${skinDataUrl}")` : "none"};
     mask-image:${(!isVideoSkin && controllerBg !== "none") ? `url("${skinDataUrl}")` : "none"};
@@ -470,7 +632,7 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
     -webkit-mask-position:center; mask-position:center;
     -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat;
   }
-  #body-effect canvas { width:100%; height:100%; display:block; mix-blend-mode:screen; }
+  .body-effect canvas { width:100%; height:100%; display:block; mix-blend-mode:screen; }
   /* Black backdrop — same silhouette mask as #rgb-body, filled solid black so
      there's no transparency showing through behind the RGB glow (mirrors the
      mouse/keyboard RGB backdrop treatment; see ControllerPreview.tsx). */
@@ -499,7 +661,7 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
 <div id="controller-blur-wrap">
   ${config.showShadow ? (() => {
     const rad = (config.shadowAngle * Math.PI) / 180;
-    const dist = 16;
+    const dist = config.shadowDistance ?? 16;
     const x = Math.round(Math.sin(rad) * dist);
     const y = Math.round(-Math.cos(rad) * dist);
     const a = config.shadowIntensity;
@@ -509,10 +671,10 @@ export async function generateExportHtml(config: ControllerConfig, overrides: La
   ${RGB_BODY_ENABLED ? `<div id="rgb-body-black"></div><div id="rgb-body"><canvas id="rgb-body-canvas"></canvas></div>` : ""}
   <div id="controller-skin"></div>
   ${isVideoSkin ? `<div id="controller-video-wrap"${videoFilter ? ` style="filter:${videoFilter}"` : ""}><video id="controller-video" src="${skinDataUrl}" autoplay ${config.controllerSkinLoop ? "loop" : ""} muted playsinline></video></div>` : ""}
-  ${BODY_EFFECT !== "none" ? `<div id="body-effect"><canvas id="body-effect-canvas"></canvas></div>` : ""}
+  ${BODY_EFFECTS_ENABLED.filter(e => e.enabled).map(e => `<div class="body-effect" id="body-effect-${e.id}"><canvas id="body-effect-canvas-${e.id}"></canvas></div>`).join("")}
   ${btnHtml}
-  <div class="stick-wrap" id="lstick-wrap"><div class="stick-inner" id="lstick-inner">${leftStickImg}</div></div>
-  <div class="stick-wrap" id="rstick-wrap"><div class="stick-inner" id="rstick-inner">${rightStickImg}</div></div>
+  <div class="stick-wrap" id="lstick-wrap"><div class="stick-inner" id="lstick-inner">${stickShadowHtml}<div class="stick-img-clip">${leftStickImg}</div>${stickHighlightHtml}${config.leftStickCometEnabled ? `<div class="stick-comet-wrap"><canvas id="lstick-comet"></canvas></div>` : ""}${config.leftStickElectricEnabled ? `<div class="stick-electric-wrap"><canvas id="lstick-electric"></canvas></div>` : ""}${config.leftStickSparkEnabled ? `<div class="stick-spark-wrap"><canvas id="lstick-spark"></canvas></div>` : ""}<div class="stick-press-glow" id="lstick-press-glow"></div><div class="stick-press-dark" id="lstick-press-dark"></div></div></div>
+  <div class="stick-wrap" id="rstick-wrap"><div class="stick-inner" id="rstick-inner">${stickShadowHtml}<div class="stick-img-clip">${rightStickImg}</div>${stickHighlightHtml}${config.rightStickCometEnabled ? `<div class="stick-comet-wrap"><canvas id="rstick-comet"></canvas></div>` : ""}${config.rightStickElectricEnabled ? `<div class="stick-electric-wrap"><canvas id="rstick-electric"></canvas></div>` : ""}${config.rightStickSparkEnabled ? `<div class="stick-spark-wrap"><canvas id="rstick-spark"></canvas></div>` : ""}<div class="stick-press-glow" id="rstick-press-glow"></div><div class="stick-press-dark" id="rstick-press-dark"></div></div></div>
 </div><!-- end controller-blur-wrap -->
   <div id="disconnected-msg">
     <div id="disconnected-box">
@@ -527,7 +689,10 @@ ${config.showWatermark ? `` : ""}
 <script>
 (function(){
   var DEAD=${DEAD_ZONE}, TRAVEL=${TRAVEL}, MAX_OP=${MAX_OP};
-  var GLOW=${GLOW}, GLOW_SIZE=${GLOW_SIZE}, INNER_FADE=${INNER_FADE}, OUTER_FADE=${OUTER_FADE};
+  var BTN_COLOR_OPACITY=${BTN_COLOR_OPACITY};
+  var BTN_GLOW_INTENSITY=${BTN_GLOW_INTENSITY};
+  var GLOW=${GLOW}, GLOW_SIZE=${GLOW_SIZE};
+  var BTN_MODE="${BTN_MODE}";
   var DEF_COLOR="${DEF_COLOR}";
   var L_STICK_COLOR="${lStickColor}";
   var R_STICK_COLOR="${rStickColor}";
@@ -536,6 +701,25 @@ ${config.showWatermark ? `` : ""}
   var STICK_OPACITY=${config.stickOpacity ?? 1};
   var STICK_GLOW=${config.stickGlowEnabled ? "true" : "false"};
   var STICK_GLOW_SIZE=${config.stickGlowSize ?? 8};
+  var STICK_GLOW_INTENSITY=${config.stickGlowEnabled ? (config.stickGlowIntensity ?? 0.85) : 0};
+  var L_COMET_ENABLED=${config.leftStickCometEnabled ? "true" : "false"};
+  var L_COMET_COLOR="${config.leftStickCometColor || "#00e5ff"}";
+  var L_COMET_SPEED=${config.leftStickCometSpeed ?? 3};
+  var R_COMET_ENABLED=${config.rightStickCometEnabled ? "true" : "false"};
+  var R_COMET_COLOR="${config.rightStickCometColor || "#00e5ff"}";
+  var R_COMET_SPEED=${config.rightStickCometSpeed ?? 3};
+  var L_ELECTRIC_ENABLED=${config.leftStickElectricEnabled ? "true" : "false"};
+  var L_ELECTRIC_COLOR="${config.leftStickElectricColor || "#4de2ff"}";
+  var L_ELECTRIC_SPEED=${config.leftStickElectricSpeed ?? 3};
+  var R_ELECTRIC_ENABLED=${config.rightStickElectricEnabled ? "true" : "false"};
+  var R_ELECTRIC_COLOR="${config.rightStickElectricColor || "#4de2ff"}";
+  var R_ELECTRIC_SPEED=${config.rightStickElectricSpeed ?? 3};
+  var L_SPARK_ENABLED=${config.leftStickSparkEnabled ? "true" : "false"};
+  var L_SPARK_COLOR="${config.leftStickSparkColor || "#ff9d3c"}";
+  var L_SPARK_SPEED=${config.leftStickSparkSpeed ?? 3};
+  var R_SPARK_ENABLED=${config.rightStickSparkEnabled ? "true" : "false"};
+  var R_SPARK_COLOR="${config.rightStickSparkColor || "#ff9d3c"}";
+  var R_SPARK_SPEED=${config.rightStickSparkSpeed ?? 3};
 
   // Shared across the RGB-body and body-effect sub-IIFEs below (closures
   // over the same mutable objects) so reactive effects can react to live
@@ -556,8 +740,8 @@ ${config.showWatermark ? `` : ""}
     var r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
     return 'rgba('+r+','+g+','+b+','+a+')';
   }
-  function innerFadeBg(c, cx, cy){
-    return 'radial-gradient(circle at '+cx+' '+cy+', '+c+' 0%, '+hexToRgba(c,.5)+' 45%, transparent 100%)';
+  function twoToneBg(c1, c2, cx, cy){
+    return 'radial-gradient(circle at '+cx+' '+cy+', '+c1+' 0%, '+c2+' 100%)';
   }
   function dead(v){ return Math.abs(v)<DEAD ? 0 : v; }
 
@@ -566,41 +750,107 @@ ${config.showWatermark ? `` : ""}
   var lstickInner = document.getElementById('lstick-inner');
   var rstickInner = document.getElementById('rstick-inner');
   var msgEl = document.getElementById('disconnected-msg');
-  var btns = document.querySelectorAll('.btn');
+  var btnWraps = document.querySelectorAll('.btn-wrap');
 
-  function applyBtn(el, op){
-    var c = getComputedStyle(el).getPropertyValue('--c').trim() || DEF_COLOR;
-    var cx = getComputedStyle(el).getPropertyValue('--cx').trim() || '50%';
-    var cy = getComputedStyle(el).getPropertyValue('--cy').trim() || '50%';
-    el.style.opacity = op;
-    el.style.background = (INNER_FADE && op > 0) ? innerFadeBg(c, cx, cy) : c;
-    var f = 'none';
-    if (GLOW && op > 0.01) {
-      f = 'drop-shadow(0 0 '+GLOW_SIZE+'px '+hexToRgba(c,.9)+')';
-      if (OUTER_FADE) f += ' drop-shadow(0 0 '+(GLOW_SIZE*2)+'px '+hexToRgba(c,.35)+')';
-      if (INNER_FADE) f += ' brightness(1.25)';
-    }
-    el.style.filter = 'none';
-
-    var idx = el.getAttribute('data-btn');
+  // Mirrors ControllerPreview.tsx's button press system exactly (see its
+  // pressAmt/colorAmt/testGlowShadow/testDropGlow — isTouchpadTest is
+  // permanently true there, so this IS the current model, not a fallback).
+  // pressAmt is the raw 0-1 "how pressed" fraction — analog pull for
+  // triggers, 1/0 for every other button — from which everything else here
+  // (Fill opacity, dark press-tint, ring/glow alpha) is derived directly.
+  // Note GLOW/glowEnabled is intentionally NOT read here: the live preview's
+  // own glowFilter is gated behind a branch (!isTouchpadTest) that never
+  // runs, so the ring/glow currently always shows regardless of that toggle
+  // — this mirrors that real (if perhaps unintended) live behavior exactly.
+  function applyBtn(idx, pressAmt){
     var wrapEl = document.querySelector('[data-wrap="'+idx+'"]');
-    if (wrapEl) wrapEl.style.filter = f;
+    if (!wrapEl) return;
+    var c = getComputedStyle(wrapEl).getPropertyValue('--c').trim() || DEF_COLOR;
+    var activeOpacity = pressAmt * MAX_OP;
+    var colorAmt = pressAmt * BTN_COLOR_OPACITY;
+    // Separate multiplier for the glow's own bloom layers only (not the
+    // ring's own color, which stays governed by colorAmt) — mirrors
+    // ControllerPreview.tsx's glowAmt exactly.
+    var glowAmt = colorAmt * BTN_GLOW_INTENSITY;
+    var testActive = pressAmt > 0.01;
 
-    // Sync stroke layer opacity with main button
     var strokeEl = document.querySelector('[data-stroke="'+idx+'"]');
-    if (strokeEl) strokeEl.style.opacity = op;
+    if (strokeEl) strokeEl.style.opacity = activeOpacity;
+
+    var darkEl = document.querySelector('[data-dark="'+idx+'"]');
+    if (darkEl) darkEl.style.background = testActive ? 'rgba(0,0,0,'+(0.5*pressAmt)+')' : 'rgba(0,0,0,0)';
+
+    var ringOuterEl = document.querySelector('[data-ringouter="'+idx+'"]');
+    if (ringOuterEl) {
+      if (testActive) {
+        ringOuterEl.style.display = 'block';
+        var ringEl = document.querySelector('[data-ring="'+idx+'"]');
+        if (ringEl) ringEl.style.background = hexToRgba(c, colorAmt);
+        var midEl = document.querySelector('[data-ringmid="'+idx+'"]');
+        if (midEl) {
+          midEl.style.filter =
+            'blur(4px) drop-shadow(0 0 4px rgba(255,255,255,'+(0.9*glowAmt)+')) '+
+            'drop-shadow(0 0 '+(GLOW_SIZE*0.4)+'px '+hexToRgba(c,glowAmt)+') '+
+            'drop-shadow(0 0 '+(GLOW_SIZE*0.8)+'px '+hexToRgba(c,0.6*glowAmt)+') '+
+            'drop-shadow(0 0 '+(GLOW_SIZE*1.2)+'px '+hexToRgba(c,0.3*glowAmt)+') '+
+            'drop-shadow(3px 5px 6px rgba(0,0,0,'+(0.55*pressAmt)+'))';
+        }
+      } else {
+        ringOuterEl.style.display = 'none';
+      }
+      return;
+    }
+
+    var geoEl = document.querySelector('[data-geoglow="'+idx+'"]');
+    if (geoEl) {
+      geoEl.style.boxShadow = testActive
+        ? '0 0 4px 2px rgba(255,255,255,'+(0.9*glowAmt)+'), '+
+          '0 0 '+(GLOW_SIZE*0.6)+'px '+(GLOW_SIZE*0.6)+'px '+hexToRgba(c,glowAmt)+', '+
+          '0 0 '+(GLOW_SIZE*1.4)+'px '+(GLOW_SIZE*1.4)+'px '+hexToRgba(c,0.6*glowAmt)+', '+
+          '0 0 '+(GLOW_SIZE*2.4)+'px '+(GLOW_SIZE*2)+'px '+hexToRgba(c,0.3*glowAmt)+', '+
+          '3px 5px 6px rgba(0,0,0,'+(0.55*pressAmt)+')'
+        : 'none';
+    }
   }
 
   function applyStickTilt(inner, ax, ay, pressed, color){
     var tiltAmount = 18;
     var tiltX = -ay * tiltAmount;
     var tiltY = ax * tiltAmount;
-    inner.style.transform = 'translate('+(ax*TRAVEL)+'px,'+(ay*TRAVEL)+'px) rotateX('+tiltX+'deg) rotateY('+tiltY+'deg)';
-    inner.style.filter = pressed
-      ? 'drop-shadow(0 0 4px white) drop-shadow(0 0 '+Math.max(STICK_GLOW_SIZE,8)+'px '+color+')'
-      : 'none';
+    var t = 'translate('+(ax*TRAVEL)+'px,'+(ay*TRAVEL)+'px) rotateX('+tiltX+'deg) rotateY('+tiltY+'deg)';
+    // Every effect (comet/electric/spark/press-glow/press-dark) is now a
+    // real DOM child of .stick-inner (see .stick-img-clip comment above),
+    // so setting the transform here ONCE is enough — they all tilt as one
+    // rigid subtree instead of each needing the same rotation copied onto
+    // them separately, which is what caused the ring to visibly drift/oval
+    // away from the rim the more the stick tilted (rotating a differently-
+    // sized box by the same angle around the same center does not
+    // perspective-project identically to rotating the original box).
+    inner.style.transform = t;
+    inner.style.filter = 'none';
     var wrap = inner.parentElement;
     if(wrap) wrap.style.opacity = '';
+
+    // Layered box-shadow (not drop-shadow) — same exact recipe as
+    // ControllerPreview.tsx's pressBoxShadow, scaled by STICK_GLOW_INTENSITY
+    // (previously ignored entirely: a fixed, unscaled drop-shadow filter).
+    var glowEl = inner.querySelector('.stick-press-glow');
+    if (glowEl) {
+      glowEl.style.boxShadow = pressed
+        ? '0 0 4px 2px rgba(255,255,255,'+(0.9*STICK_GLOW_INTENSITY)+'), '+
+          '0 0 '+(STICK_GLOW_SIZE*0.6)+'px '+(STICK_GLOW_SIZE*0.6)+'px '+hexToRgba(color,STICK_GLOW_INTENSITY)+', '+
+          '0 0 '+(STICK_GLOW_SIZE*1.4)+'px '+(STICK_GLOW_SIZE*1.4)+'px '+hexToRgba(color,STICK_GLOW_INTENSITY*0.6)+', '+
+          '0 0 '+(STICK_GLOW_SIZE*2.4)+'px '+(STICK_GLOW_SIZE*2)+'px '+hexToRgba(color,STICK_GLOW_INTENSITY*0.3)
+        : 'none';
+    }
+    // Press darken — same dark translucent shade the face buttons get,
+    // rendered AFTER (on top of) the glow above — the glow's drop-shadow
+    // renders as a mostly solid blurred disc covering the whole face
+    // (unlike the face buttons' hollow-ring glow), so putting the darken
+    // underneath it made the dim completely invisible, washed out by the
+    // much brighter glow on top of it.
+    var darkEl = inner.querySelector('.stick-press-dark');
+    if (darkEl) darkEl.style.background = pressed ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0)';
   }
 
   function poll(){
@@ -619,15 +869,15 @@ ${config.showWatermark ? `` : ""}
     if(ltVal < 0.04) ltVal = 0;
     if(rtVal < 0.04) rtVal = 0;
 
-    for(var b=0;b<btns.length;b++){
-      var idx = parseInt(btns[b].getAttribute('data-btn'));
-      // Triggers (6/7) get their own analog fill from ltVal/rtVal, but still
-      // need to feed pressedButtons — otherwise reactive body effects never
-      // see them as pressed (this used to continue before setting that).
-      if(idx===6){ applyBtn(btns[b], ltVal*MAX_OP); pressedButtons[idx] = ltVal>0.1; continue; }
-      if(idx===7){ applyBtn(btns[b], rtVal*MAX_OP); pressedButtons[idx] = rtVal>0.1; continue; }
+    for(var b=0;b<btnWraps.length;b++){
+      var idx = parseInt(btnWraps[b].getAttribute('data-wrap'));
+      // Triggers (6/7) get their own analog pressAmt from ltVal/rtVal, but
+      // still need to feed pressedButtons — otherwise reactive body effects
+      // never see them as pressed (this used to continue before setting that).
+      if(idx===6){ applyBtn(idx, ltVal); pressedButtons[idx] = ltVal>0.1; continue; }
+      if(idx===7){ applyBtn(idx, rtVal); pressedButtons[idx] = rtVal>0.1; continue; }
       var pressed = gp.buttons[idx] ? (gp.buttons[idx].pressed || gp.buttons[idx].value>0.1) : false;
-      applyBtn(btns[b], pressed ? MAX_OP : 0);
+      applyBtn(idx, pressed ? 1 : 0);
       pressedButtons[idx] = pressed;
     }
 
@@ -695,7 +945,7 @@ ${config.showWatermark ? `` : ""}
         if(MODE === 'breathing'){
           // Full-bright color that cycles hue over time while pulsing in/out — never blank
           var raw = 0.5 + 0.5*Math.sin(t*2.5);
-          var pulse = 0.55 + 0.45*raw;
+          var pulse = 0.3 + 0.7*raw; // dim floor, never transparent — mirrors RgbBodyCanvas.tsx exactly
           var hue = RAINBOW ? t*0.08 : 0;
           ctx.fillStyle = getC(hue, INTENSITY * pulse);
           ctx.fillRect(0,0,w,h);
@@ -705,7 +955,7 @@ ${config.showWatermark ? `` : ""}
           // with a continuous brightness pulse layered on top
           var repeats = 1;
           var pulseRaw = 0.5 + 0.5*Math.sin(t*3);
-          var pulse2 = 0.55 + 0.45*pulseRaw;
+          var pulse2 = 0.25 + 0.75*pulseRaw; // wider dim-to-bright swing, never transparent — mirrors RgbBodyCanvas.tsx exactly
           var grad = ctx.createLinearGradient(0,0,w,0);
           var steps = 120;
           for(var i=0; i<=steps; i++){
@@ -725,16 +975,451 @@ ${config.showWatermark ? `` : ""}
   })();
   ` : ""}
 
+  // ── Thumbstick Comet LED — a glowing dot that revolves around each
+  //    stick's rim, leaving a fading trail behind it. Independent per
+  //    stick; mirrors StickCometOverlay.tsx exactly. ──
+  function initStickComet(canvasId, color, speed, phaseOffset){
+    var canvas = document.getElementById(canvasId);
+    if(!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var wrap = canvas.parentElement;
+    var CONTAINER_SCALE = 1.24;
+    var r = parseInt(color.slice(1,3),16), g = parseInt(color.slice(3,5),16), b = parseInt(color.slice(5,7),16);
+    var t = 0, last = performance.now();
+
+    function draw(w, h){
+      ctx.clearRect(0,0,w,h);
+      var cx=w/2, cy=h/2;
+      var R = (Math.min(w,h)/2) / CONTAINER_SCALE;
+      var period = Math.max(speed, 0.5);
+      var headAngle = (t/period) * Math.PI*2 - Math.PI/2 + phaseOffset;
+
+      // Continuous tapered tail — a polyline of overlapping round-capped
+      // segments (not discrete dots), extended and eased so it fades out
+      // gradually — mirrors StickCometOverlay.tsx exactly.
+      var tailSteps = 56, tailSpan = Math.PI*1.35;
+      var prevX = cx + Math.cos(headAngle)*R, prevY = cy + Math.sin(headAngle)*R;
+      ctx.lineCap = 'round';
+      for(var i=1; i<=tailSteps; i++){
+        var f = i/tailSteps;
+        var ang = headAngle - f*tailSpan;
+        var px = cx + Math.cos(ang)*R, py = cy + Math.sin(ang)*R;
+        var fade = Math.pow(1-f, 2.6);
+        ctx.beginPath();
+        ctx.moveTo(prevX, prevY);
+        ctx.lineTo(px, py);
+        ctx.lineWidth = 3.6*Math.pow(1-f, 1.3);
+        ctx.strokeStyle = 'rgba('+r+','+g+','+b+','+fade+')';
+        ctx.stroke();
+        prevX = px; prevY = py;
+      }
+
+      // LED head — pulses independently, colored to match the picked color,
+      // with a soft radial-gradient glow (fades smoothly instead of a
+      // hard-edge blob) plus a glare highlight.
+      var pulse = 0.5 + 0.5*Math.sin(t*Math.PI*2*1.6);
+      var hx = cx + Math.cos(headAngle)*R, hy = cy + Math.sin(headAngle)*R;
+      var headR = 3.0 + 0.8*pulse;
+
+      var glowR = headR*4.5;
+      var glowGrd = ctx.createRadialGradient(hx,hy,0,hx,hy,glowR);
+      glowGrd.addColorStop(0, 'rgba('+r+','+g+','+b+','+(0.55+0.3*pulse)+')');
+      glowGrd.addColorStop(0.45, 'rgba('+r+','+g+','+b+','+(0.18+0.12*pulse)+')');
+      glowGrd.addColorStop(1, 'rgba('+r+','+g+','+b+',0)');
+      ctx.fillStyle = glowGrd;
+      ctx.beginPath(); ctx.arc(hx,hy,glowR,0,Math.PI*2); ctx.fill();
+
+      ctx.beginPath(); ctx.arc(hx,hy,headR,0,Math.PI*2);
+      ctx.fillStyle = 'rgba('+r+','+g+','+b+',1)';
+      ctx.fill();
+
+      ctx.beginPath(); ctx.arc(hx-headR*0.35, hy-headR*0.35, headR*0.4, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,'+(0.75+0.2*pulse)+')';
+      ctx.fill();
+    }
+
+    function tick(now){
+      var dt = Math.min(0.05, (now-last)/1000);
+      last = now; t += dt;
+      if(canvas.width > 0 && canvas.height > 0) draw(canvas.width, canvas.height);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    // Sizing is handled independently of the draw loop above (rAF is
+    // suspended entirely for backgrounded/inactive tabs, which would
+    // otherwise leave the canvas stuck at its default 300x150 buffer).
+    // ResizeObserver is the primary mechanism; a synchronous read at mount
+    // and a low-frequency interval both backstop cases where the observer's
+    // callback doesn't fire promptly (seen for elements nested inside a
+    // transform-style:preserve-3d ancestor — the stick's tilt container).
+    // Mirrors StickCometOverlay.tsx exactly.
+    function applySize(width, height){
+      var w = Math.round(width), h = Math.round(height);
+      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    }
+    var ro = new ResizeObserver(function(entries){
+      var e = entries[0];
+      applySize(e.contentRect.width, e.contentRect.height);
+    });
+    ro.observe(wrap);
+    // offsetWidth/offsetHeight, NOT getBoundingClientRect() — inside the
+    // stick's 3D-rotated tilt container, getBoundingClientRect() reports the
+    // foreshortened, post-perspective on-screen box, which shrinks and goes
+    // non-square as the stick tilts. offsetWidth/offsetHeight reflect the
+    // untransformed CSS layout box instead, matching ResizeObserver.
+    applySize(wrap.offsetWidth, wrap.offsetHeight);
+    setInterval(function(){
+      applySize(wrap.offsetWidth, wrap.offsetHeight);
+    }, 500);
+  }
+  if (L_COMET_ENABLED) initStickComet('lstick-comet', L_COMET_COLOR, L_COMET_SPEED, 0);
+  if (R_COMET_ENABLED) initStickComet('rstick-comet', R_COMET_COLOR, R_COMET_SPEED, Math.PI);
+
+  // ── Thumbstick Spark — comet-style revolving head/trail that also flings
+  //    off sparks as it travels, like the crackling embers along the rim of
+  //    a portal ring. Independent per stick; mirrors StickSparkOverlay.tsx
+  //    exactly. ──
+  function initStickSpark(canvasId, color, speed, phaseOffset){
+    var canvas = document.getElementById(canvasId);
+    if(!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var wrap = canvas.parentElement;
+    var CONTAINER_SCALE = 1.35;
+    var r = parseInt(color.slice(1,3),16), g = parseInt(color.slice(3,5),16), b = parseInt(color.slice(5,7),16);
+    var t = 0, last = performance.now();
+    var sparks = [];
+
+    function draw(w, h, dt){
+      ctx.clearRect(0,0,w,h);
+      var cx=w/2, cy=h/2;
+      var R = (Math.min(w,h)/2) / CONTAINER_SCALE;
+      var period = Math.max(speed, 0.5);
+      var headAngle = (t/period) * Math.PI*2 - Math.PI/2 + phaseOffset;
+
+      var tailSteps = 56, tailSpan = Math.PI*1.35;
+      var prevX = cx + Math.cos(headAngle)*R, prevY = cy + Math.sin(headAngle)*R;
+      ctx.lineCap = 'round';
+      for(var i=1; i<=tailSteps; i++){
+        var f = i/tailSteps;
+        var ang = headAngle - f*tailSpan;
+        var px = cx + Math.cos(ang)*R, py = cy + Math.sin(ang)*R;
+        var fade = Math.pow(1-f, 2.6);
+        ctx.beginPath();
+        ctx.moveTo(prevX, prevY);
+        ctx.lineTo(px, py);
+        ctx.lineWidth = 3.6*Math.pow(1-f, 1.3);
+        ctx.strokeStyle = 'rgba('+r+','+g+','+b+','+fade+')';
+        ctx.stroke();
+        prevX = px; prevY = py;
+      }
+
+      var pulse = 0.5 + 0.5*Math.sin(t*Math.PI*2*1.6);
+      var hx = cx + Math.cos(headAngle)*R, hy = cy + Math.sin(headAngle)*R;
+      var headR = 3.0 + 0.8*pulse;
+
+      var glowR = headR*4.5;
+      var glowGrd = ctx.createRadialGradient(hx,hy,0,hx,hy,glowR);
+      glowGrd.addColorStop(0, 'rgba('+r+','+g+','+b+','+(0.55+0.3*pulse)+')');
+      glowGrd.addColorStop(0.45, 'rgba('+r+','+g+','+b+','+(0.18+0.12*pulse)+')');
+      glowGrd.addColorStop(1, 'rgba('+r+','+g+','+b+',0)');
+      ctx.fillStyle = glowGrd;
+      ctx.beginPath(); ctx.arc(hx,hy,glowR,0,Math.PI*2); ctx.fill();
+
+      ctx.beginPath(); ctx.arc(hx,hy,headR,0,Math.PI*2);
+      ctx.fillStyle = 'rgba('+r+','+g+','+b+',1)';
+      ctx.fill();
+
+      ctx.beginPath(); ctx.arc(hx-headR*0.35, hy-headR*0.35, headR*0.4, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,'+(0.75+0.2*pulse)+')';
+      ctx.fill();
+
+      // Spark emission — thrown off mostly tangent to the head's direction
+      // of travel, with a splash of outward randomness.
+      var tangentAng = headAngle + Math.PI/2;
+      var emitCount = 2 + Math.floor(Math.random()*3);
+      for (var ei=0; ei<emitCount; ei++){
+        var spread = (Math.random()-0.5)*2.2;
+        var ang2 = tangentAng + spread;
+        var launchSpd = R * (0.9 + Math.random()*1.6);
+        sparks.push({
+          x: hx, y: hy,
+          vx: Math.cos(ang2)*launchSpd, vy: Math.sin(ang2)*launchSpd,
+          life: 0,
+          maxLife: 0.35 + Math.random()*0.4,
+          size: 1.1 + Math.random()*1.6
+        });
+      }
+
+      // Update + draw each spark as a short streak; friction slows it and a
+      // gentle pull back toward the stick's center curls the tail off as it
+      // fizzles, mirroring StickSparkOverlay.tsx exactly.
+      ctx.lineCap = 'round';
+      for (var si=sparks.length-1; si>=0; si--){
+        var s = sparks[si];
+        s.life += dt;
+        if (s.life >= s.maxLife){ sparks.splice(si,1); continue; }
+        s.vx *= 0.93;
+        s.vy *= 0.93;
+        var toCx = cx - s.x, toCy = cy - s.y;
+        var toLen = Math.hypot(toCx, toCy) || 1;
+        s.vx += (toCx/toLen) * 5 * dt * R;
+        s.vy += (toCy/toLen) * 5 * dt * R;
+        var prevSX = s.x, prevSY = s.y;
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+        var sFade = 1 - s.life/s.maxLife;
+        ctx.beginPath();
+        ctx.moveTo(prevSX, prevSY);
+        ctx.lineTo(s.x, s.y);
+        ctx.lineWidth = s.size * sFade;
+        ctx.strokeStyle = 'rgba('+r+','+g+','+b+','+sFade+')';
+        ctx.shadowBlur = 5*sFade;
+        ctx.shadowColor = 'rgba('+r+','+g+','+b+','+(0.7*sFade)+')';
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    }
+
+    function tick(now){
+      var dt = Math.min(0.05, (now-last)/1000);
+      last = now; t += dt;
+      if(canvas.width > 0 && canvas.height > 0) draw(canvas.width, canvas.height, dt);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    function applySize(width, height){
+      var w = Math.round(width), h = Math.round(height);
+      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    }
+    var roS = new ResizeObserver(function(entries){
+      var e = entries[0];
+      applySize(e.contentRect.width, e.contentRect.height);
+    });
+    roS.observe(wrap);
+    // offsetWidth/offsetHeight, NOT getBoundingClientRect() — see comment on
+    // the comet init above; same fix, same reason.
+    applySize(wrap.offsetWidth, wrap.offsetHeight);
+    setInterval(function(){
+      applySize(wrap.offsetWidth, wrap.offsetHeight);
+    }, 500);
+  }
+  if (L_SPARK_ENABLED) initStickSpark('lstick-spark', L_SPARK_COLOR, L_SPARK_SPEED, 0);
+  if (R_SPARK_ENABLED) initStickSpark('rstick-spark', R_SPARK_COLOR, R_SPARK_SPEED, Math.PI);
+
+  // ── Thumbstick Electric — a crackling current trail (comet-style, not a
+  //    fully-lit ring) around the stick's rim plus sporadic thin arcing
+  //    bolts jumping outward. Independent per stick, separate from the
+  //    comet LED. Mirrors StickElectricOverlay.tsx exactly. ──
+  function buildBoltPath(x0, y0, x1, y1, roughness, depth){
+    if (depth <= 0) return [{x:x0,y:y0},{x:x1,y:y1}];
+    var mx=(x0+x1)/2, my=(y0+y1)/2;
+    var dx=x1-x0, dy=y1-y0;
+    var len=Math.sqrt(dx*dx+dy*dy)||1;
+    var nx=-dy/len, ny=dx/len;
+    var disp=(Math.random()-0.5)*roughness;
+    var midX=mx+nx*disp, midY=my+ny*disp;
+    var left=buildBoltPath(x0,y0,midX,midY,roughness*0.55,depth-1);
+    var right=buildBoltPath(midX,midY,x1,y1,roughness*0.55,depth-1);
+    return left.concat(right.slice(1));
+  }
+
+  function initStickElectric(canvasId, color, speed, phaseOffset){
+    var canvas = document.getElementById(canvasId);
+    if(!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var wrap = canvas.parentElement;
+    var CONTAINER_SCALE = 1.4;
+    var r = parseInt(color.slice(1,3),16), g = parseInt(color.slice(3,5),16), b = parseInt(color.slice(5,7),16);
+    var t = 0, last = performance.now();
+
+    var ptN = 40;
+    var jitter = new Array(ptN).fill(0);
+    // Per-bucket jaggedness intensity and thickness — both drift slowly on
+    // their own so some stretches of the trail read as calm/thin and others
+    // as violently jagged/thick, instead of uniform crackle everywhere.
+    var jitterAmp = new Array(ptN).fill(1);
+    var widthNoise = new Array(ptN).fill(1);
+    var pulseNoise = 0;
+    var nextArcAt = 0;
+    var nextBigArcAt = 2 + Math.random()*3;
+    var arcs = [];
+
+    function draw(w, h){
+      ctx.clearRect(0,0,w,h);
+      var cx=w/2, cy=h/2;
+      var R = (Math.min(w,h)/2) / CONTAINER_SCALE;
+      var spd = Math.max(speed, 0.5);
+      var period = spd;
+      var headAngle = (t/period) * Math.PI*2 - Math.PI/2 + phaseOffset;
+      var tailSpan = Math.PI*1.5;
+
+      // lineCap "round" on a trail drawn as many short independent
+      // segments read as "a bunch of little balls" — round caps at BOTH
+      // ends of every tiny segment overlap into beads. "butt" caps abut
+      // cleanly since consecutive segments share exact endpoints.
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'butt';
+
+      for(var i=0;i<ptN;i++){
+        jitterAmp[i] += (Math.random()-0.5)*0.15;
+        jitterAmp[i] = Math.max(0.35, Math.min(2.4, jitterAmp[i]));
+        jitter[i] += (Math.random()-0.5)*2.2*jitterAmp[i];
+        jitter[i] *= 0.85;
+
+        widthNoise[i] += (Math.random()-0.5)*0.12;
+        widthNoise[i] = Math.max(0.45, Math.min(1.9, widthNoise[i]));
+      }
+
+      pulseNoise += (Math.random()-0.5)*1.8;
+      pulseNoise = Math.max(-1, Math.min(1, pulseNoise*0.9));
+      var trailPulse = Math.max(0.25, 0.75 + 0.3*Math.sin(t*Math.PI*2*3.1 + phaseOffset*1.7) + 0.35*pulseNoise);
+
+      var steps = 44;
+      var prevX=0, prevY=0, havePrev=false;
+      for(var i2=0; i2<=steps; i2++){
+        var f = i2/steps;
+        var ang = headAngle - f*tailSpan;
+        var bucket = ((Math.floor((ang/(Math.PI*2))*ptN) % ptN) + ptN) % ptN;
+        var rr = R + jitter[bucket];
+        var px = cx + Math.cos(ang)*rr, py = cy + Math.sin(ang)*rr;
+        if (havePrev){
+          var flicker = 0.7 + Math.random()*0.6;
+          var fade = Math.pow(1-f, 1.6) * trailPulse * flicker;
+          ctx.beginPath();
+          ctx.moveTo(prevX, prevY);
+          ctx.lineTo(px, py);
+          ctx.lineWidth = (3.4*(1-f*0.6)) * widthNoise[bucket] * (0.85 + Math.random()*0.35);
+          ctx.strokeStyle = 'rgba('+r+','+g+','+b+','+Math.min(1, 0.95*fade)+')';
+          ctx.shadowBlur = 10*fade;
+          ctx.shadowColor = 'rgba('+r+','+g+','+b+','+Math.min(1, 0.85*fade)+')';
+          ctx.stroke();
+        }
+        prevX = px; prevY = py; havePrev = true;
+      }
+      ctx.shadowBlur = 0;
+
+      // Arcing bolts INWARD onto the stick's face (not outward past the
+      // rim), no head marker/ball, frequency pulled back down.
+      if (t > nextArcAt){
+        var startAng = Math.random()*Math.PI*2;
+        var x0 = cx + Math.cos(startAng)*R, y0 = cy + Math.sin(startAng)*R;
+        var reach = R*(0.25+Math.random()*0.4);
+        var endAng = startAng + (Math.random()-0.5)*0.7;
+        var innerR = Math.max(R*0.15, R-reach);
+        var x1 = cx + Math.cos(endAng)*innerR, y1 = cy + Math.sin(endAng)*innerR;
+        arcs.push({
+          path: buildBoltPath(x0,y0,x1,y1,R*0.22,6),
+          life: 0,
+          maxLife: 0.09+Math.random()*0.07,
+          width: 1.0+Math.random()*1.0
+        });
+        nextArcAt = t + (0.3+Math.random()*0.9)/spd;
+      }
+
+      // Occasional BIG bolt reaching across the stick's face, rim to rim —
+      // rarer, thicker, more jagged, and sometimes forks into a second
+      // branch partway along, like a real lightning strike splitting off.
+      if (t > nextBigArcAt){
+        var bStartAng = Math.random()*Math.PI*2;
+        var bx0 = cx + Math.cos(bStartAng)*R, by0 = cy + Math.sin(bStartAng)*R;
+        var bEndAng = bStartAng + Math.PI + (Math.random()-0.5)*1.1;
+        var bEndR = R*(0.75+Math.random()*0.25);
+        var bx1 = cx + Math.cos(bEndAng)*bEndR, by1 = cy + Math.sin(bEndAng)*bEndR;
+        var bRoughness = R*(0.3+Math.random()*0.28);
+        var mainPath = buildBoltPath(bx0,by0,bx1,by1,bRoughness,7);
+        var bMaxLife = 0.12+Math.random()*0.09;
+        var bWidth = 2.1+Math.random()*1.6;
+        arcs.push({ path: mainPath, life: 0, maxLife: bMaxLife, width: bWidth });
+
+        if (Math.random() < 0.55){
+          var splitIdx = Math.floor(mainPath.length * (0.3+Math.random()*0.35));
+          var sp = mainPath[splitIdx];
+          var branchAng = Math.atan2(sp.y-cy, sp.x-cx) + (Math.random()-0.5)*1.8;
+          var branchLen = R*(0.3+Math.random()*0.4);
+          var bx = sp.x + Math.cos(branchAng)*branchLen;
+          var by = sp.y + Math.sin(branchAng)*branchLen;
+          arcs.push({
+            path: buildBoltPath(sp.x, sp.y, bx, by, bRoughness*0.7, 5),
+            life: 0,
+            maxLife: bMaxLife*(0.7+Math.random()*0.3),
+            width: bWidth*0.55
+          });
+        }
+
+        nextBigArcAt = t + (1.5+Math.random()*2.6)/spd;
+      }
+
+      ctx.lineJoin = 'miter';
+      ctx.lineCap = 'butt';
+      for (var ai=arcs.length-1; ai>=0; ai--){
+        var arc = arcs[ai];
+        arc.life += 1/60;
+        if (arc.life >= arc.maxLife){ arcs.splice(ai,1); continue; }
+        var fade2 = 1 - arc.life/arc.maxLife;
+        ctx.beginPath();
+        for (var pi=0; pi<arc.path.length; pi++){
+          var p = arc.path[pi];
+          if (pi===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+        }
+        ctx.lineWidth = arc.width*1.8;
+        ctx.strokeStyle = 'rgba('+r+','+g+','+b+','+(0.45*fade2)+')';
+        ctx.shadowBlur = 9;
+        ctx.shadowColor = 'rgba('+r+','+g+','+b+','+(0.75*fade2)+')';
+        ctx.stroke();
+        ctx.lineWidth = arc.width*0.55;
+        ctx.strokeStyle = 'rgba(255,255,255,'+fade2+')';
+        ctx.shadowBlur = 0;
+        ctx.stroke();
+      }
+    }
+
+    function tick(now){
+      var dt = Math.min(0.05, (now-last)/1000);
+      last = now; t += dt;
+      if(canvas.width > 0 && canvas.height > 0) draw(canvas.width, canvas.height);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    function applySize(width, height){
+      var w = Math.round(width), h = Math.round(height);
+      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    }
+    var ro2 = new ResizeObserver(function(entries){
+      var e = entries[0];
+      applySize(e.contentRect.width, e.contentRect.height);
+    });
+    ro2.observe(wrap);
+    // offsetWidth/offsetHeight, NOT getBoundingClientRect() — see comment on
+    // the comet init above; same fix, same reason.
+    applySize(wrap.offsetWidth, wrap.offsetHeight);
+    setInterval(function(){
+      applySize(wrap.offsetWidth, wrap.offsetHeight);
+    }, 500);
+  }
+  if (L_ELECTRIC_ENABLED) initStickElectric('lstick-electric', L_ELECTRIC_COLOR, L_ELECTRIC_SPEED, 0);
+  if (R_ELECTRIC_ENABLED) initStickElectric('rstick-electric', R_ELECTRIC_COLOR, R_ELECTRIC_SPEED, Math.PI);
+
   // ── Body Effects ──
-  ${BODY_EFFECT !== "none" ? `
-  (function(){
-    var canvas = document.getElementById('body-effect-canvas');
-    var wrap = document.getElementById('body-effect');
+  ${ANY_BODY_EFFECT ? `
+  function initBodyEffect(canvasId, wrapId, EFFECT){
+    var canvas = document.getElementById(canvasId);
+    var wrap = document.getElementById(wrapId);
     if(!canvas || !wrap) return;
     var ctx = canvas.getContext('2d');
     var SPEED = ${BODY_EFFECT_SPEED};
     var INTENSITY = ${BODY_EFFECT_INTENSITY};
-    var EFFECT = '${BODY_EFFECT}';
     var BASE_HUE = ${(() => {
       const c = config.pulseGlowColor || '#7b2ff7';
       if (!c.startsWith('#') || c.length !== 7) return 270;
@@ -745,25 +1430,13 @@ ${config.showWatermark ? `` : ""}
       let h = max === r ? (g-b)/d+(g<b?6:0) : max === g ? (b-r)/d+2 : (r-g)/d+4;
       return Math.round(h * 60);
     })()};
-    var FIRE_HUE1 = ${(() => {
-      const c = config.fireColor1 || '#ff2200';
-      if (!c.startsWith('#') || c.length !== 7) return 10;
-      const r = parseInt(c.slice(1,3),16)/255, g = parseInt(c.slice(3,5),16)/255, b = parseInt(c.slice(5,7),16)/255;
-      const max = Math.max(r,g,b), min = Math.min(r,g,b);
-      if (max === min) return 0;
-      const d = max-min; let h = max===r?(g-b)/d+(g<b?6:0):max===g?(b-r)/d+2:(r-g)/d+4;
-      return Math.round(h*60);
-    })()};
-    var FIRE_HUE2 = ${(() => {
-      const c = config.fireColor2 || '#ff8800';
-      if (!c.startsWith('#') || c.length !== 7) return 30;
-      const r = parseInt(c.slice(1,3),16)/255, g = parseInt(c.slice(3,5),16)/255, b = parseInt(c.slice(5,7),16)/255;
-      const max = Math.max(r,g,b), min = Math.min(r,g,b);
-      if (max === min) return 0;
-      const d = max-min; let h = max===r?(g-b)/d+(g<b?6:0):max===g?(b-r)/d+2:(r-g)/d+4;
-      return Math.round(h*60);
-    })()};
-    var FIRE_GLOW_SPEED = ${BODY_EFFECT_SPEED};
+    var FIRE_HUE1 = ${hexToHslStatic(config.fireColor1 || '#ff2200')[0]};
+    var FIRE_SAT1 = ${hexToHslStatic(config.fireColor1 || '#ff2200')[1]};
+    var FIRE_LIGHT1 = ${hexToHslStatic(config.fireColor1 || '#ff2200')[2]};
+    var FIRE_HUE2 = ${hexToHslStatic(config.fireColor2 || '#ff8800')[0]};
+    var FIRE_SAT2 = ${hexToHslStatic(config.fireColor2 || '#ff8800')[1]};
+    var FIRE_LIGHT2 = ${hexToHslStatic(config.fireColor2 || '#ff8800')[2]};
+    var FIRE_GLOW_SPEED = ${config.fireGlowSpeed ?? 4};
     var FIRE_EMBER_SPEED = ${config.fireEmberSpeed ?? 6};
 
     // Wait for real canvas dimensions via ResizeObserver
@@ -784,20 +1457,62 @@ ${config.showWatermark ? `` : ""}
       else if(EFFECT === 'pulseGlow') initPulseGlow();
       else if(EFFECT === 'fire') initFire();
       else if(EFFECT === 'reactive') initReactive();
-      else if(EFFECT === 'reactiveReverse') initReactiveReverse();
       else if(EFFECT === 'particleBurst') initParticleBurst();
       else if(EFFECT === 'reactiveFire') initReactiveFire();
     }
 
     var REACTIVE_COLOR = '${config.reactiveRippleColor || "#ffffff"}';
     var REACTIVE_RAINBOW = ${config.reactiveRippleRainbow ? "true" : "false"};
+    var PARTICLES_HUE = ${(() => {
+      const c = config.particlesColor || '#ffffff';
+      if (!c.startsWith('#') || c.length !== 7) return 0;
+      const r = parseInt(c.slice(1,3),16)/255, g = parseInt(c.slice(3,5),16)/255, b = parseInt(c.slice(5,7),16)/255;
+      const max = Math.max(r,g,b), min = Math.min(r,g,b);
+      if (max === min) return 0;
+      const d = max-min; let h = max===r?(g-b)/d+(g<b?6:0):max===g?(b-r)/d+2:(r-g)/d+4;
+      return Math.round(h*60);
+    })()};
+    var PARTICLES_RAINBOW = ${config.particlesRainbow ? "true" : "false"};
     function reactiveGetC(hue, a){
       if(REACTIVE_RAINBOW){
         var h = ((hue*360)%360+360)%360;
-        return 'hsla('+h+',100%,65%,'+a+')';
+        return 'hsla('+h+',100%,58%,'+a+')';
       }
       var rr=parseInt(REACTIVE_COLOR.slice(1,3),16), rg=parseInt(REACTIVE_COLOR.slice(3,5),16), rb=parseInt(REACTIVE_COLOR.slice(5,7),16);
       return 'rgba('+rr+','+rg+','+rb+','+a+')';
+    }
+
+    // Real highlight+shadow bevel instead of an "overlay" composite trough —
+    // overlay/multiply blending on near-black is luminance-dependent (barely
+    // darkens already-bright pixels), so on a shiny/light controller skin it
+    // was nearly invisible. A bright band on one edge and a dark band on the
+    // other, both plain alpha-composited, reads as genuine 3D relief
+    // regardless of what's underneath. Mirrors BodyEffectOverlay.tsx's
+    // drawBevel exactly.
+    function drawBevel(cx, cy, R, T, alpha){
+      // Toned down (peaks were 0.55/0.65, now 0.32/0.42) and the gradient
+      // span widened with a flat mid-plateau instead of a single sharp peak
+      // stop — mirrors BodyEffectOverlay.tsx's drawBevel exactly.
+      // Highlight alpha halved again (0.32→0.16) — was reading as a bright
+      // washed-out white band on top of the color, not a subtle 3D cue.
+      var w = canvas.width, h = canvas.height;
+      var hiR = Math.max(0, R - T*0.4);
+      var hiGrd = ctx.createRadialGradient(cx, cy, Math.max(0, hiR-T*1.3), cx, cy, hiR+T*0.6);
+      hiGrd.addColorStop(0,   'rgba(255,255,255,0)');
+      hiGrd.addColorStop(0.4, 'rgba(255,255,255,'+(alpha*0.16)+')');
+      hiGrd.addColorStop(0.6, 'rgba(255,255,255,'+(alpha*0.16)+')');
+      hiGrd.addColorStop(1,   'rgba(255,255,255,0)');
+      ctx.fillStyle = hiGrd;
+      ctx.fillRect(0,0,w,h);
+
+      var shR = R + T*0.55;
+      var shGrd = ctx.createRadialGradient(cx, cy, Math.max(0, shR-T*0.7), cx, cy, shR+T*1.6);
+      shGrd.addColorStop(0,   'rgba(0,0,0,0)');
+      shGrd.addColorStop(0.4, 'rgba(0,0,0,'+(alpha*0.42)+')');
+      shGrd.addColorStop(0.6, 'rgba(0,0,0,'+(alpha*0.42)+')');
+      shGrd.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.fillStyle = shGrd;
+      ctx.fillRect(0,0,w,h);
     }
 
     // ── Reactive Ripple ──
@@ -829,64 +1544,23 @@ ${config.showWatermark ? `` : ""}
           var frac = age / rippleLife;
           var R = rip.edgeR + frac * Math.max(w,h) * 1.3;
           var T = Math.max(w,h) * 0.06;
-          var alpha = Math.max(0, (1-frac) * INTENSITY);
+          // Boosted 1.35x (clamped to 1) — the color was reading
+          // washed-out/pastel; shoulders now hold full alpha too.
+          var alpha = Math.min(1, Math.max(0, (1-frac) * INTENSITY) * 1.35);
           var hue = (((age/rippleLife)*300 + (rip.cx/w)*120)%360+360)%360;
           var grd = ctx.createRadialGradient(rip.cx, rip.cy, Math.max(0, R-T), rip.cx, rip.cy, R+T);
-          grd.addColorStop(0, reactiveGetC(hue, 0));
-          grd.addColorStop(0.3, reactiveGetC(hue, alpha*0.5));
-          grd.addColorStop(0.5, reactiveGetC(hue, alpha));
-          grd.addColorStop(0.7, reactiveGetC(hue, alpha*0.5));
-          grd.addColorStop(1, reactiveGetC(hue, 0));
+          grd.addColorStop(0,    reactiveGetC(hue, 0));
+          grd.addColorStop(0.15, reactiveGetC(hue, alpha));
+          grd.addColorStop(0.3,  reactiveGetC(hue, alpha));
+          grd.addColorStop(0.7,  reactiveGetC(hue, alpha));
+          grd.addColorStop(0.85, reactiveGetC(hue, alpha));
+          grd.addColorStop(1,    reactiveGetC(hue, 0));
           ctx.fillStyle = grd;
           ctx.fillRect(0,0,w,h);
-        }
-        requestAnimationFrame(tick);
-      }
-      tick();
-    }
 
-    // ── Reactive Reverse — mirror of the reactive ripple: instead of a ring
-    //    expanding outward from the button, it starts big and far away and
-    //    converges inward, brightening as it closes in on the press point. ──
-    function initReactiveReverse(){
-      var ripples = [];
-      var prevPressed = {};
-      var rt = 0;
-      function tick(){
-        rt += 0.016;
-        var w=canvas.width, h=canvas.height;
-        ctx.clearRect(0,0,w,h);
-        var rippleLife = Math.max(SPEED, 0.5) * 0.22;
-        ripples = ripples.filter(function(r){ return rt - r.startT < rippleLife; });
-        for(var idx in pressedButtons){
-          if(pressedButtons[idx] && !prevPressed[idx]){
-            var pos = btnPositions[idx];
-            if(pos){
-              var hwhh = buttonHWHH(pos, w);
-              ripples.push({cx:(pos.x/100)*w, cy:(pos.y/100)*h, startT:rt, edgeR:Math.min(hwhh[0],hwhh[1])});
-            }
-          }
-        }
-        prevPressed = {};
-        for(var k in pressedButtons) prevPressed[k] = pressedButtons[k];
-
-        var maxSpread = Math.max(w,h) * 0.7;
-        for(var i=0;i<ripples.length;i++){
-          var rip = ripples[i];
-          var age = rt - rip.startT;
-          var frac = Math.min(1, age / rippleLife);
-          var R = rip.edgeR + (1-frac) * maxSpread;
-          var T = Math.max(w,h) * 0.06;
-          var alpha = frac * INTENSITY;
-          var hue = (((age/rippleLife)*300 + (rip.cx/w)*120)%360+360)%360;
-          var grd = ctx.createRadialGradient(rip.cx, rip.cy, Math.max(0, R-T), rip.cx, rip.cy, R+T);
-          grd.addColorStop(0, reactiveGetC(hue, 0));
-          grd.addColorStop(0.3, reactiveGetC(hue, alpha*0.5));
-          grd.addColorStop(0.5, reactiveGetC(hue, alpha));
-          grd.addColorStop(0.7, reactiveGetC(hue, alpha*0.5));
-          grd.addColorStop(1, reactiveGetC(hue, 0));
-          ctx.fillStyle = grd;
-          ctx.fillRect(0,0,w,h);
+          // Highlight+shadow bevel for real 3D depth — mirrors
+          // BodyEffectOverlay.tsx's reactive3DRef exactly.
+          drawBevel(rip.cx, rip.cy, R, Math.max(w,h)*0.055, alpha);
         }
         requestAnimationFrame(tick);
       }
@@ -1034,7 +1708,9 @@ ${config.showWatermark ? `` : ""}
       var useC1=Math.random()<0.6;
       return {
         angle:angle,
-        radialOffset: -0.03+Math.random()*0.13,
+        // Strictly ahead of the wave's edge, tight band — never behind/inside
+        // it, clustered close together as one shower riding the front.
+        radialOffset: 0.03+Math.random()*0.12,
         wobbleAmp: 0.12+Math.random()*0.3, wobbleFreq: 1+Math.random()*2, wobblePhase: Math.random()*Math.PI*2,
         bobAmp: 0.02+Math.random()*0.04, bobFreq: 1.5+Math.random()*2.5, bobPhase: Math.random()*Math.PI*2,
         r:r, kind:kind,
@@ -1046,7 +1722,11 @@ ${config.showWatermark ? `` : ""}
       for(var i=0; i<embers.length; i++){
         var em=embers[i];
         var emberAngle = em.angle + Math.sin(age*em.wobbleFreq + em.wobblePhase) * em.wobbleAmp;
-        var emberR = R + em.radialOffset*maxSpread + Math.sin(age*em.bobFreq + em.bobPhase)*em.bobAmp*maxSpread;
+        // Bob is 0..bobAmp (not -bobAmp..bobAmp) — a plain sine could swing
+        // negative and pull the ember behind the wave despite radialOffset
+        // itself always being positive. Mirrors BodyEffectOverlay.tsx exactly.
+        var bob = (0.5 + 0.5*Math.sin(age*em.bobFreq + em.bobPhase)) * em.bobAmp;
+        var emberR = R + (em.radialOffset + bob)*maxSpread;
         if(emberR < 1) continue;
         var px = cx + Math.cos(emberAngle)*emberR;
         var py = cy + Math.sin(emberAngle)*emberR;
@@ -1056,43 +1736,48 @@ ${config.showWatermark ? `` : ""}
         if(a <= 0.01) continue;
         ctx.shadowBlur=0;
 
+        // Lightness caps pulled down across this ride-ember rendering (was
+        // 85-95%, functionally white regardless of hue) — Reactive Fire's
+        // dense embers ring were reading as one solid white bezel around the
+        // wave instead of colored sparks. Mirrors BodyEffectOverlay.tsx's
+        // updateAndDrawRideEmbers exactly.
         if(em.kind==='tiny'){
           var ta=a*(0.3+0.7*flicker);
           ctx.beginPath();ctx.arc(px,py,em.r*(0.6+0.4*flicker),0,Math.PI*2);
-          ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,'+(85+10*flicker)+'%,'+ta+')';
-          ctx.shadowBlur=4+8*flicker;ctx.shadowColor='hsla('+em.hue+','+em.sat+'%,80%,'+ta+')';ctx.fill();
+          ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,'+(62+10*flicker)+'%,'+ta+')';
+          ctx.shadowBlur=4+8*flicker;ctx.shadowColor='hsla('+em.hue+','+em.sat+'%,58%,'+ta+')';ctx.fill();
         } else if(em.kind==='medium'){
           var ma=a*(0.4+0.6*flicker);
           ctx.beginPath();ctx.arc(px,py,em.r*(0.5+0.3*flicker),0,Math.PI*2);
-          ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,'+(75+20*flicker)+'%,'+ma+')';
-          ctx.shadowBlur=5+5*flicker;ctx.shadowColor='hsla('+em.hue+','+em.sat+'%,75%,'+(ma*0.8)+')';ctx.fill();
+          ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,'+(55+15*flicker)+'%,'+ma+')';
+          ctx.shadowBlur=5+5*flicker;ctx.shadowColor='hsla('+em.hue+','+em.sat+'%,55%,'+(ma*0.8)+')';ctx.fill();
           if(em.r>1.5){
             var ang0=emberAngle;
             ctx.save();ctx.translate(px-Math.cos(ang0)*em.r*2.5, py-Math.sin(ang0)*em.r*2.5);ctx.rotate(ang0);
             ctx.beginPath();ctx.ellipse(0,0,em.r*0.1,em.r*(0.5+0.4*flicker),0,0,Math.PI*2);
-            ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,65%,'+(ma*0.25)+')';ctx.fill();
+            ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,50%,'+(ma*0.25)+')';ctx.fill();
             ctx.restore();
           }
         } else if(em.kind==='large'){
-          var la=a*(0.25+0.4*flicker);
+          var la=a*(0.45+0.55*flicker);
           var gr2=ctx.createRadialGradient(px,py,0,px,py,em.r*(1.2+0.4*flicker));
-          gr2.addColorStop(0,'hsla('+em.hue+','+em.sat+'%,80%,'+la+')');
-          gr2.addColorStop(0.5,'hsla('+em.hue+','+em.sat+'%,60%,'+(la*0.5)+')');
+          gr2.addColorStop(0,'hsla('+em.hue+','+em.sat+'%,62%,'+la+')');
+          gr2.addColorStop(0.5,'hsla('+em.hue+','+em.sat+'%,50%,'+(la*0.5)+')');
           gr2.addColorStop(1,'hsla('+em.hue+','+em.sat+'%,40%,0)');
           ctx.beginPath();ctx.arc(px,py,em.r*(1.2+0.4*flicker),0,Math.PI*2);
           ctx.fillStyle=gr2;ctx.fill();
           ctx.beginPath();ctx.arc(px,py,em.r*0.35,0,Math.PI*2);
-          ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,92%,'+(la*1.4)+')';ctx.fill();
+          ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,68%,'+(la*0.9)+')';ctx.fill();
         } else {
           var lna=a*(0.4+0.6*flicker), ang=emberAngle, len=6+em.spd*8+flicker*6;
           ctx.save();ctx.translate(px,py);ctx.rotate(ang);
           var sg=ctx.createLinearGradient(-len,0,em.r*2,0);
-          sg.addColorStop(0,'hsla('+em.hue+','+em.sat+'%,70%,0)');
-          sg.addColorStop(0.6,'hsla('+em.hue+','+em.sat+'%,80%,'+(lna*0.6)+')');
-          sg.addColorStop(1,'hsla('+em.hue+','+em.sat+'%,95%,'+lna+')');
+          sg.addColorStop(0,'hsla('+em.hue+','+em.sat+'%,58%,0)');
+          sg.addColorStop(0.6,'hsla('+em.hue+','+em.sat+'%,60%,'+(lna*0.6)+')');
+          sg.addColorStop(1,'hsla('+em.hue+','+em.sat+'%,68%,'+lna+')');
           ctx.beginPath();ctx.moveTo(-len,0);ctx.lineTo(em.r*2,0);
           ctx.strokeStyle=sg;ctx.lineWidth=em.r*(0.6+0.6*flicker);ctx.lineCap='round';
-          ctx.shadowBlur=4+6*flicker;ctx.shadowColor='hsla('+em.hue+','+em.sat+'%,80%,'+(lna*0.8)+')';
+          ctx.shadowBlur=4+6*flicker;ctx.shadowColor='hsla('+em.hue+','+em.sat+'%,58%,'+(lna*0.8)+')';
           ctx.stroke();ctx.restore();
         }
       }
@@ -1105,26 +1790,44 @@ ${config.showWatermark ? `` : ""}
         ft += 0.016;
         var w=canvas.width, h=canvas.height;
         ctx.clearRect(0,0,w,h);
-        var life = Math.max(SPEED, 0.5) * 0.3;
+        // Same time coefficient as reactive (0.22).
+        var life = Math.max(SPEED, 0.5) * 0.22;
         events = events.filter(function(e){ return ft - e.startT < e.life; });
         for(var idx in pressedButtons){
           if(pressedButtons[idx] && !prevPressed[idx]){
             var pos = btnPositions[idx];
             if(pos){
               var cx=(pos.x/100)*w, cy=(pos.y/100)*h;
-              var n = 12;
+              var n = 100; // a ton more embers — a dense, busy shower
               var embers = [];
               for(var i=0;i<n;i++) embers.push(spawnRideFireEmber(i,n));
-              events.push({cx:cx, cy:cy, startT:ft, life:life, embers:embers});
+              var lobeCount = 14;
+              var lobes = [];
+              for(var li=0; li<lobeCount; li++){
+                lobes.push({
+                  angle: (li/lobeCount)*Math.PI*2 + (Math.random()-0.5)*(Math.PI*2/lobeCount)*0.8,
+                  sizeMult: 0.7+Math.random()*0.9,
+                  phase: Math.random()*Math.PI*2,
+                  freq: 3+Math.random()*4,
+                  hueT: Math.random()
+                });
+              }
+              events.push({cx:cx, cy:cy, startT:ft, life:life, embers:embers, lobes:lobes});
             }
           }
         }
         prevPressed = {};
         for(var k in pressedButtons) prevPressed[k] = pressedButtons[k];
 
-        var maxSpread = Math.max(w,h) * 0.45;
+        // Matches reactive's spread coefficient (1.3).
+        var maxSpread = Math.max(w,h) * 1.3;
+        var mixHue = function(t){ return FIRE_HUE1 + (FIRE_HUE2-FIRE_HUE1)*t; };
+        var mixSat = function(t){ return FIRE_SAT1 + (FIRE_SAT2-FIRE_SAT1)*t; };
 
-        // Pass 1 — every wave first
+        // Pass 1 — every wave first. A smooth multi-stop blend through the
+        // two colors (not a hard 40%/70% split) plus several pulsing "lobes"
+        // riding the ring at different angles/phases — that raggedness plus
+        // flicker is what actually reads as fire instead of a flat ring.
         for(var ei=0; ei<events.length; ei++){
           var evt = events[ei];
           var age = ft - evt.startT;
@@ -1133,13 +1836,34 @@ ${config.showWatermark ? `` : ""}
           var alpha = Math.max(0, 1-frac) * INTENSITY;
           if(alpha <= 0.02 || R < 1) continue;
           var T = Math.max(w,h) * 0.05;
+
           var grd = ctx.createRadialGradient(evt.cx, evt.cy, Math.max(0,R-T), evt.cx, evt.cy, R+T);
-          grd.addColorStop(0, 'hsla('+FIRE_HUE1+',90%,55%,0)');
-          grd.addColorStop(0.4, 'hsla('+FIRE_HUE1+',90%,55%,'+(alpha*0.8)+')');
-          grd.addColorStop(0.7, 'hsla('+FIRE_HUE2+',90%,50%,'+(alpha*0.5)+')');
-          grd.addColorStop(1, 'hsla('+FIRE_HUE2+',90%,50%,0)');
+          grd.addColorStop(0,    'hsla('+mixHue(0)+','+mixSat(0)+'%,58%,0)');
+          grd.addColorStop(0.15, 'hsla('+mixHue(0)+','+mixSat(0)+'%,58%,'+(alpha)+')');
+          grd.addColorStop(0.35, 'hsla('+mixHue(0.35)+','+mixSat(0.35)+'%,55%,'+(alpha*0.9)+')');
+          grd.addColorStop(0.55, 'hsla('+mixHue(0.6)+','+mixSat(0.6)+'%,52%,'+(alpha*0.75)+')');
+          grd.addColorStop(0.8,  'hsla('+mixHue(0.9)+','+mixSat(0.9)+'%,48%,'+(alpha*0.5)+')');
+          grd.addColorStop(1,    'hsla('+mixHue(1)+','+mixSat(1)+'%,48%,0)');
           ctx.fillStyle = grd;
           ctx.fillRect(0,0,w,h);
+
+          for(var lo=0; lo<evt.lobes.length; lo++){
+            var lobe = evt.lobes[lo];
+            var pulse = 0.6 + 0.4*Math.sin(age*lobe.freq + lobe.phase);
+            var lobeR = T * lobe.sizeMult * (0.8 + 0.5*pulse);
+            var lx = evt.cx + Math.cos(lobe.angle)*R, ly = evt.cy + Math.sin(lobe.angle)*R;
+            var lh = mixHue(lobe.hueT), ls = mixSat(lobe.hueT);
+            var lgrd = ctx.createRadialGradient(lx, ly, 0, lx, ly, lobeR);
+            lgrd.addColorStop(0,   'hsla('+lh+','+ls+'%,64%,'+(alpha*pulse)+')');
+            lgrd.addColorStop(0.6, 'hsla('+lh+','+ls+'%,55%,'+(alpha*0.7*pulse)+')');
+            lgrd.addColorStop(1,   'hsla('+lh+','+ls+'%,50%,0)');
+            ctx.fillStyle = lgrd;
+            ctx.beginPath(); ctx.arc(lx, ly, lobeR, 0, Math.PI*2); ctx.fill();
+          }
+
+          // Highlight+shadow bevel for real 3D depth — mirrors
+          // BodyEffectOverlay.tsx's reactiveFire3DRef exactly.
+          drawBevel(evt.cx, evt.cy, R, Math.max(w,h)*0.045, alpha);
         }
 
         // Pass 2 — every ember on top, riding its wave's current radius
@@ -1161,30 +1885,56 @@ ${config.showWatermark ? `` : ""}
       var particles = [];
       function randP(){
         var a=Math.random()*Math.PI*2, s=0.1+Math.random()*0.7, ml=80+Math.random()*220;
+        var hue = PARTICLES_RAINBOW ? Math.random()*360 : PARTICLES_HUE + (Math.random()-0.5)*14;
+        var hueShift = PARTICLES_RAINBOW ? (Math.random()-0.5)*1.5 : 0;
         return {x:Math.random()*canvas.width,y:Math.random()*canvas.height,
           vx:Math.cos(a)*s,vy:Math.sin(a)*s-Math.random()*0.3,
-          r:0.5+Math.random()*3.5,hue:Math.random()*360,hueShift:(Math.random()-0.5)*1.5,
+          r:0.5+Math.random()*1.8,hue:hue,hueShift:hueShift,
           life:Math.random()*ml,maxLife:ml,twinkle:Math.random()*Math.PI*2,
-          twinkleSpeed:0.02+Math.random()*0.08,opacity:0.4+Math.random()*0.6};
+          twinkleSpeed:0.02+Math.random()*0.08,opacity:0.7+Math.random()*0.3};
       }
-      var count=Math.round(20*INTENSITY)+15;
+      // More, smaller particles — mirrors BodyEffectOverlay.tsx's particleRef.
+      var count=Math.round(90*INTENSITY)+60;
       for(var i=0;i<count;i++) particles.push(randP());
       var ss=6/Math.max(SPEED,0.5);
       function tick(){
         ctx.clearRect(0,0,canvas.width,canvas.height);
         for(var i=0;i<particles.length;i++){
           var p=particles[i];
+          // Random per-frame jitter plus an occasional hard direction snap
+          // for a sporadic/darting motion instead of smooth floating.
+          p.vx += (Math.random()-0.5)*0.14; p.vy += (Math.random()-0.5)*0.14;
+          if(Math.random()<0.015){ var sa=Math.random()*Math.PI*2, ss2=0.4+Math.random()*0.8; p.vx=Math.cos(sa)*ss2; p.vy=Math.sin(sa)*ss2; }
+          var sp=Math.sqrt(p.vx*p.vx+p.vy*p.vy), maxSp=1.3;
+          if(sp>maxSp){ p.vx=p.vx/sp*maxSp; p.vy=p.vy/sp*maxSp; }
           p.x+=p.vx*ss; p.y+=p.vy*ss; p.hue=(p.hue+p.hueShift*ss)%360;
           p.life+=ss; p.twinkle+=p.twinkleSpeed*ss;
           if(p.x<-10)p.x=canvas.width+10; if(p.x>canvas.width+10)p.x=-10;
           if(p.y<-10)p.y=canvas.height+10; if(p.y>canvas.height+10)p.y=-10;
           if(p.life>=p.maxLife){particles[i]=randP();continue;}
           var lf=p.life/p.maxLife,fade=lf<0.15?lf/0.15:lf>0.75?1-(lf-0.75)/0.25:1;
-          var tw=(Math.sin(p.twinkle)+1)/2, a=fade*p.opacity*(0.4+0.6*tw)*INTENSITY;
-          ctx.beginPath(); ctx.arc(p.x,p.y,p.r*(0.7+0.3*tw),0,Math.PI*2);
+          var tw=(Math.sin(p.twinkle)+1)/2;
+          // Floor raised from 0.65+0.35*tw to 0.8+0.2*tw, plus an
+          // intensity-driven size/glow boost — mirrors BodyEffectOverlay.tsx's
+          // particleRef exactly.
+          var boost=0.6+0.4*INTENSITY;
+          var a=fade*p.opacity*(0.8+0.2*tw)*INTENSITY;
+          var pr=p.r*(0.85+0.35*tw)*boost;
+          // Soft blurred drop shadow via radial gradient — mirrors
+          // BodyEffectOverlay.tsx's particleRef exactly.
+          var sx=p.x+pr*0.9, sy=p.y+pr*1.3, sr=pr*2.2;
+          var shGrd=ctx.createRadialGradient(sx,sy,0,sx,sy,sr);
+          shGrd.addColorStop(0,'rgba(0,0,0,'+(a*0.65)+')');
+          shGrd.addColorStop(0.6,'rgba(0,0,0,'+(a*0.35)+')');
+          shGrd.addColorStop(1,'rgba(0,0,0,0)');
+          ctx.fillStyle=shGrd;
+          ctx.beginPath(); ctx.arc(sx,sy,sr,0,Math.PI*2); ctx.fill();
+
+          ctx.beginPath(); ctx.arc(p.x,p.y,pr,0,Math.PI*2);
           ctx.fillStyle='hsla('+p.hue+',90%,70%,'+a+')';
-          ctx.shadowBlur=8+6*tw; ctx.shadowColor='hsla('+p.hue+',90%,65%,'+(a*0.8)+')';
+          ctx.shadowBlur=(4+3*tw)*boost; ctx.shadowColor='hsla('+p.hue+',90%,65%,'+(a*0.6)+')';
           ctx.fill();
+          ctx.shadowBlur=0;
         }
         requestAnimationFrame(tick);
       }
@@ -1192,30 +1942,67 @@ ${config.showWatermark ? `` : ""}
     }
 
     // ── Pulse Glow ──
+    // Rim hugging the outer edge (punch a blurred, inset hole out of a
+    // filled canvas — the wrap's own silhouette CSS mask then clips it to
+    // the controller's real shape). Once per cycle a wave detaches from the
+    // rim's own inner boundary (not the controller's true outer edge) and
+    // travels to the center; rim and wave share one envelope so they read
+    // as one pulse instead of two separate layered effects.
     function initPulseGlow(){
       var t=0, ss=1/Math.max(SPEED,0.5);
       var col='${config.pulseGlowColor || "#ffffff"}';
       var r=parseInt(col.slice(1,3),16), g2=parseInt(col.slice(3,5),16), b=parseInt(col.slice(5,7),16);
       function ha(a){ return 'rgba('+r+','+g2+','+b+','+a+')'; }
+      function roundRectPath(x,y,w,h,rad){
+        var rr=Math.min(rad,w/2,h/2);
+        ctx.moveTo(x+rr,y);
+        ctx.arcTo(x+w,y,x+w,y+h,rr);
+        ctx.arcTo(x+w,y+h,x,y+h,rr);
+        ctx.arcTo(x,y+h,x,y,rr);
+        ctx.arcTo(x,y,x+w,y,rr);
+        ctx.closePath();
+      }
       function tick(){
         var w=canvas.width, h=canvas.height;
         ctx.clearRect(0,0,w,h);
         t+=0.016*ss;
-        var pulse=(Math.sin(t*Math.PI*2)+1)/2;
-        var a1=(0.55+0.45*pulse)*INTENSITY;
-        var a2=(0.2+0.15*pulse)*INTENSITY;
-        var depth=0.28;
-        function edge(x0,y0,x1,y1){
-          var g=ctx.createLinearGradient(x0,y0,x1,y1);
-          g.addColorStop(0,ha(a1));
-          g.addColorStop(0.5,ha(a2));
-          g.addColorStop(1,ha(0));
-          ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+        var cyclePos=t-Math.floor(t);
+        var env=Math.sin(cyclePos*Math.PI);
+        var cx=w/2, cy=h/2;
+
+        var insetFrac=0.14;
+        var insetX=w*insetFrac, insetY=h*insetFrac;
+        var cornerR=Math.min(insetX,insetY)*1.4;
+        var rimAlpha=(0.45+0.55*env)*INTENSITY;
+        ctx.save();
+        ctx.fillStyle=ha(rimAlpha);
+        ctx.fillRect(0,0,w,h);
+        ctx.globalCompositeOperation='destination-out';
+        ctx.filter='blur('+(Math.max(insetX,insetY)*0.35)+'px)';
+        ctx.beginPath();
+        roundRectPath(insetX,insetY,w-insetX*2,h-insetY*2,cornerR);
+        ctx.fillStyle='rgba(0,0,0,1)';
+        ctx.fill();
+        ctx.restore();
+
+        var ringStartR=1-insetFrac;
+        var ringR=ringStartR*(1-cyclePos);
+        var ringFadeIn=Math.min(1,cyclePos/0.05);
+        var centerFalloff=Math.pow(ringR/ringStartR,1.4);
+        var ringAlpha=ringFadeIn*centerFalloff*INTENSITY*0.95;
+        var ringThickness=ringStartR*0.26;
+        if(ringR>0.02 && ringAlpha>0.02){
+          ctx.save();
+          ctx.translate(cx,cy);
+          ctx.scale(w/2,h/2);
+          var rg=ctx.createRadialGradient(0,0,Math.max(0,ringR-ringThickness),0,0,ringR+ringThickness);
+          rg.addColorStop(0,ha(0));
+          rg.addColorStop(0.5,ha(ringAlpha));
+          rg.addColorStop(1,ha(0));
+          ctx.fillStyle=rg;
+          ctx.fillRect(-2,-2,4,4);
+          ctx.restore();
         }
-        edge(0,h,0,h*(1-depth));
-        edge(0,0,0,h*depth);
-        edge(0,0,w*depth,0);
-        edge(w,0,w*(1-depth),0);
         requestAnimationFrame(tick);
       }
       tick();
@@ -1232,18 +2019,36 @@ ${config.showWatermark ? `` : ""}
         if(roll<0.3){r=0.4+Math.random()*0.8;spd=0.3+Math.random()*1.2;ml=20+Math.random()*50;fspd=0.6+Math.random()*1.2;}
         else if(roll<0.6){r=1.2+Math.random()*1.8;spd=0.2+Math.random()*0.9;ml=50+Math.random()*100;fspd=0.2+Math.random()*0.5;}
         else if(roll<0.8){r=2.5+Math.random()*3;spd=0.1+Math.random()*0.4;ml=80+Math.random()*140;fspd=0.05+Math.random()*0.15;}
-        else{r=0.5+Math.random()*1;spd=0.4+Math.random()*1.8;ml=30+Math.random()*70;fspd=0.3+Math.random()*0.8;}
+        else{r=0.5+Math.random()*1;spd=2.5+Math.random()*4.5;ml=30+Math.random()*70;fspd=0.3+Math.random()*0.8;}
         var kind=roll<0.3?'tiny':roll<0.6?'medium':roll<0.8?'large':'line';
-        var angle=-Math.PI/2+(Math.random()-0.5)*Math.PI*1.6;
+        // Wider angle spread (1.6→1.9) and taller spawn band (0.65→0.55
+        // start) for a more chaotic, sporadic-looking shower.
+        var angle=-Math.PI/2+(Math.random()-0.5)*Math.PI*1.9;
         var useC1=Math.random()<0.6;
-        return {x:Math.random()*canvas.width, y:canvas.height*(0.65+Math.random()*0.35),
+        return {x:Math.random()*canvas.width, y:canvas.height*(0.55+Math.random()*0.45),
           vx:Math.cos(angle)*spd, vy:Math.sin(angle)*spd, r:r,
           life:0, maxLife:ml, kind:kind,
           hue:useC1?FIRE_HUE1+(Math.random()-0.5)*20:FIRE_HUE2+(Math.random()-0.5)*20,
           sat:90, fp:Math.random()*Math.PI*2, fs:fspd, spd:spd};
       }
-      var target=Math.round(45*INTENSITY)+25;
+      // More embers for a busier, more sporadic shower.
+      var target=Math.round(75*INTENSITY)+45;
       for(var i=0;i<target;i++){var em=spawnEmber();em.life=Math.random()*em.maxLife;embers.push(em);}
+
+      // Independently-pulsing lobes along the bottom glow's edge — mirrors
+      // BodyEffectOverlay.tsx's fireGlowLobesRef exactly.
+      var glowLobes=[];
+      (function(){
+        var n=10;
+        for(var i=0;i<n;i++){
+          glowLobes.push({
+            xFrac:(i+0.5)/n + (Math.random()-0.5)*0.07,
+            freq:0.5+Math.random()*1.3,
+            phase:Math.random()*Math.PI*2,
+            heightMult:0.6+Math.random()*0.9
+          });
+        }
+      })();
 
       function tick(){
         var w=canvas.width,h=canvas.height;
@@ -1252,11 +2057,28 @@ ${config.showWatermark ? `` : ""}
         tGlow+=0.016*ssG;
         var breathe=0.08*Math.sin(tGlow*Math.PI*2), glowH=h*(0.55+breathe);
         var grd=ctx.createLinearGradient(0,h,0,h-glowH);
-        grd.addColorStop(0,'hsla('+FIRE_HUE1+',90%,50%,'+(0.5*INTENSITY)+')');
-        grd.addColorStop(0.3,'hsla('+FIRE_HUE2+',90%,50%,'+(0.35*INTENSITY)+')');
-        grd.addColorStop(0.65,'hsla('+FIRE_HUE2+',90%,50%,'+(0.08*INTENSITY)+')');
-        grd.addColorStop(1,'hsla('+FIRE_HUE2+',90%,50%,0)');
+        grd.addColorStop(0,'hsla('+FIRE_HUE1+','+FIRE_SAT1+'%,'+FIRE_LIGHT1+'%,'+(0.95*INTENSITY)+')');
+        grd.addColorStop(0.22,'hsla('+FIRE_HUE1+','+FIRE_SAT1+'%,'+FIRE_LIGHT1+'%,'+(0.8*INTENSITY)+')');
+        grd.addColorStop(0.5,'hsla('+FIRE_HUE2+','+FIRE_SAT2+'%,'+FIRE_LIGHT2+'%,'+(0.45*INTENSITY)+')');
+        grd.addColorStop(0.75,'hsla('+FIRE_HUE2+','+FIRE_SAT2+'%,'+FIRE_LIGHT2+'%,'+(0.12*INTENSITY)+')');
+        grd.addColorStop(1,'hsla('+FIRE_HUE2+','+FIRE_SAT2+'%,'+FIRE_LIGHT2+'%,0)');
         ctx.fillStyle=grd; ctx.fillRect(0,0,w,h);
+
+        // Uneven flame-line lobes riding the glow's edge, each pulsing on
+        // its own frequency/phase instead of one smooth breathing band.
+        for(var gl=0; gl<glowLobes.length; gl++){
+          var lobe=glowLobes[gl];
+          var pulse=0.5+0.5*Math.sin(tGlow*Math.PI*2*lobe.freq+lobe.phase);
+          var lx=lobe.xFrac*w;
+          var lr=glowH*lobe.heightMult*(0.45+0.55*pulse)*0.8;
+          if(lr<1) continue;
+          var lgrd=ctx.createRadialGradient(lx,h,0,lx,h,lr);
+          lgrd.addColorStop(0,'hsla('+FIRE_HUE1+','+FIRE_SAT1+'%,'+FIRE_LIGHT1+'%,'+(0.6*INTENSITY*pulse)+')');
+          lgrd.addColorStop(0.5,'hsla('+FIRE_HUE2+','+FIRE_SAT2+'%,'+FIRE_LIGHT2+'%,'+(0.35*INTENSITY*pulse)+')');
+          lgrd.addColorStop(1,'hsla('+FIRE_HUE2+','+FIRE_SAT2+'%,'+FIRE_LIGHT2+'%,0)');
+          ctx.fillStyle=lgrd;
+          ctx.beginPath(); ctx.arc(lx,h,lr,0,Math.PI*2); ctx.fill();
+        }
         // Embers
         while(embers.length<target) embers.push(spawnEmber());
         for(var i=0;i<embers.length;i++){
@@ -1264,7 +2086,9 @@ ${config.showWatermark ? `` : ""}
           em.x+=em.vx*ssE; em.y+=em.vy*ssE; em.vy-=0.012*ssE; em.vx+=(Math.random()-0.5)*0.05*ssE; em.life+=ssE;
           if(em.life>=em.maxLife||em.y<-10){embers[i]=spawnEmber();continue;}
           var lf=em.life/em.maxLife,fade=lf<0.1?lf/0.1:lf>0.72?1-(lf-0.72)/0.28:1;
-          var flicker=(Math.sin(em.life*em.fs+em.fp)+1)/2, a=fade*INTENSITY;
+          var flicker=(Math.sin(em.life*em.fs+em.fp)+1)/2;
+          var bottomBand=h*0.4, vertFadeLinear=Math.max(0,Math.min(1,(h-em.y)/bottomBand)), vertFade=vertFadeLinear*vertFadeLinear;
+          var a=fade*INTENSITY*vertFade;
           ctx.shadowBlur=0;
           if(em.kind==='tiny'){
             var ta=a*(0.3+0.7*flicker);
@@ -1277,7 +2101,7 @@ ${config.showWatermark ? `` : ""}
             ctx.fillStyle='hsla('+em.hue+','+em.sat+'%,'+(75+20*flicker)+'%,'+ma+')';
             ctx.shadowBlur=5+5*flicker;ctx.shadowColor='hsla('+em.hue+','+em.sat+'%,75%,'+(ma*0.8)+')';ctx.fill();
           } else if(em.kind==='large'){
-            var la=a*(0.25+0.4*flicker);
+            var la=a*(0.45+0.55*flicker);
             var gr2=ctx.createRadialGradient(em.x,em.y,0,em.x,em.y,em.r*(1.2+0.4*flicker));
             gr2.addColorStop(0,'hsla('+em.hue+','+em.sat+'%,80%,'+la+')');
             gr2.addColorStop(0.5,'hsla('+em.hue+','+em.sat+'%,60%,'+(la*0.5)+')');
@@ -1303,7 +2127,8 @@ ${config.showWatermark ? `` : ""}
     }
 
     // ── Hex Grid ──
-  })();
+  }
+  ${BODY_EFFECTS_ENABLED.filter(e => e.enabled).map(e => `initBodyEffect('body-effect-canvas-${e.id}','body-effect-${e.id}','${e.id}');`).join("\n  ")}
   ` : ""}
   // ── Watermark ──
   ${config.showWatermark ? `
@@ -1314,18 +2139,32 @@ ${config.showWatermark ? `` : ""}
     // Each controller body sits a little differently in frame, so the
     // watermark's vertical position is tuned per controller type rather than
     // using one fixed value for all of them.
-    vid.style.cssText = 'position:absolute;top:${
-      config.controllerType === "c4d1" || config.controllerType === "c4d1-edge" ? "12%"
-      : config.controllerType === "c4d4" ? "7%"
-      : "3%"
-    };left:50%;transform:translateX(-50%);width:102%;pointer-events:none;';
+    // (See lib/watermarkPosition.ts — top is where the LOGO's center goes.)
+    vid.style.cssText = 'position:absolute;top:${watermarkCenterY(config.controllerType)}%;left:50%;transform:translate(-50%,-${WATERMARK_LOGO_CENTER_IN_VIDEO}%);width:50%;pointer-events:none;';
     // Appended inside #controller-blur-wrap (not #controller itself) so it
     // still inherits the blur filter when disconnected, same as everything
     // else inside the wrapper — while #disconnected-msg, a sibling outside
     // the wrapper, always stacks on top of it unblurred.
     document.getElementById('controller-blur-wrap').appendChild(vid);
-    function playOnce(){ vid.currentTime=0; vid.play(); }
-    vid.onended = function(){ setTimeout(playOnce, 15000); };
+    // The clip plays all the way through and holds on the finished logo. After
+    // that hold, fade it out instead of leaving it up until the next replay.
+    // The replay still starts 10s after the clip ends. Keep in sync with
+    // ControllerPreview.tsx.
+    var HOLD_MS = 2500, FADE_SECONDS = 1, wmFadeTimer = 0;
+    function playOnce(){
+      clearTimeout(wmFadeTimer);
+      vid.style.transition = 'none';
+      vid.style.opacity = '1';
+      vid.currentTime = 0;
+      vid.play();
+    }
+    vid.onended = function(){
+      wmFadeTimer = setTimeout(function(){
+        vid.style.transition = 'opacity ' + FADE_SECONDS + 's ease-in-out';
+        vid.style.opacity = '0';
+      }, HOLD_MS);
+      setTimeout(playOnce, 10000);
+    };
     playOnce();
   })();
   ` : ""}

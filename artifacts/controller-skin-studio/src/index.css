@@ -145,6 +145,100 @@
   body { @apply font-sans antialiased bg-background text-foreground; }
 }
 
+/* ── Customer editor theme — matches the Customs4daeZ website's own palette
+   (css/style.css :root — bg-dark #0f0f12, bg-card #16161a, text-main #fff,
+   text-muted #a0a0aa, accent #ff3344, border #24242b), converted to the HSL
+   triplets Tailwind's theme tokens expect. Scoped to .customize-theme (the
+   CustomerEditor root) rather than global :root, so the main Studio app's
+   own black/red/white theme is untouched — both entries share this
+   stylesheet since it's imported by both main.tsx and customize-main.tsx. */
+.customize-theme {
+  --background: 240 9% 6%;
+  --foreground: 0 0% 100%;
+  --border: 240 9% 15%;
+  --card: 240 8% 9%;
+  --card-foreground: 0 0% 100%;
+  --card-border: 240 9% 15%;
+  --primary: 355 100% 60%;
+  --primary-foreground: 0 0% 0%;
+  --muted: 240 8% 12%;
+  --muted-foreground: 240 6% 65%;
+  --accent: 355 100% 60%;
+  --accent-foreground: 0 0% 0%;
+  --destructive: 0 75% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 240 9% 15%;
+  --ring: 355 100% 60%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Thin, see-through scrollbars for the customizer's side cards. No arrow
+   buttons, and the track is inset top and bottom so the thumb never touches
+   the card's rounded corners. (WebKit/Chromium pseudo-elements; the
+   standard scrollbar-* properties would disable them, so Firefox gets them
+   only through the @supports fallback below.) */
+.customize-theme .customize-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.customize-theme .customize-scroll::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.customize-theme .customize-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 18px 0;
+}
+.customize-theme .customize-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.28);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .customize-theme .customize-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+  }
+}
+
 @layer utilities {
   input[type="search"]::-webkit-search-cancel-button { @apply hidden; }
+}
+
+/* ── Customer editor background — a looping workshop video fills the whole
+   page (c4d-customize.webm); every panel floats on top of it as a
+   translucent card instead of sitting on a flat color. The still frame
+   (c4d-customize.png) shows as a background-image fallback/poster underneath
+   the <video> element until it's loaded. The overlay darkens/vignettes the
+   footage so white text and card borders stay readable without needing an
+   opaque background box. */
+.customize-bg {
+  background-image: url(c4d-customize.png);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  /* Inward vignette — softly blurs/darkens toward every edge so the page
+     reads as a contained frame rather than the footage bleeding off-screen. */
+  box-shadow: inset 0 0 160px 60px rgba(0,0,0,0.85);
+}
+.customize-bg-overlay {
+  background:
+    radial-gradient(ellipse at center, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.55) 100%),
+    /* The workbench-lamp fixture baked into the source photo sits roughly
+       15-30% down from the top — right where the stage tracker lives — and
+       is bright enough to wash the tracker out. Keep that band solidly dark
+       instead of letting it fade back out by 20% like the rest of the
+       top vignette does. */
+    linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.8) 22%, rgba(0,0,0,0.35) 38%, rgba(0,0,0,0.15) 55%, rgba(0,0,0,0.15) 80%, rgba(0,0,0,0.5) 100%);
+}
+
+/* Pulsing glow on the active stage-tracker number — draws the eye to which
+   step is current without needing extra copy. */
+.step-badge-active {
+  animation: step-badge-pulse 2s ease-in-out infinite;
+}
+@keyframes step-badge-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.45); }
+  50% { box-shadow: 0 0 0 6px hsl(var(--primary) / 0); }
 }

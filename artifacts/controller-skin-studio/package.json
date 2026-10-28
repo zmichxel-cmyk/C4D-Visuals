@@ -103,5 +103,9 @@
     "directories": {
       "buildResources": "build"
     }
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.2",
+    "simplex-noise": "^4.0.3"
   }
 }

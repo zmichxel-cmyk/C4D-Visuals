@@ -5,6 +5,8 @@ import { LAYOUTS } from "../lib/layouts";
 import { generateExportHtml } from "../lib/exportHtml";
 import { useThrottledColor } from "../hooks/useThrottledColor";
 
+export type ConfigPanelSection = "stickColors" | "buttonPress" | "bodyEffects" | "rgbBody" | "stickEffects" | "settings";
+
 interface Props {
   config: ControllerConfig;
   overrides: LayoutOverrides;
@@ -12,6 +14,13 @@ interface Props {
   onResetOverrides: () => void;
   showButtonLabels: boolean;
   onToggleLabels: (v: boolean) => void;
+  // When provided, only these sections render (no Appearance/Effects tab
+  // switcher — everything shows in one flat list) and the bottom "Export
+  // HTML for OBS" button is hidden. Used by the curated customer-facing
+  // editor build, which needs a fixed subset of controls and its own
+  // save/checkout action instead of a direct file download. Omit entirely
+  // to keep the full studio experience unchanged.
+  sections?: ConfigPanelSection[];
 }
 
 function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) {
@@ -25,6 +34,13 @@ function Toggle({ label, value, onChange }: { label: string; value: boolean; onC
       </button>
     </div>
   );
+}
+
+// Shared style for the box-button grids (Body Effects, RGB Body mode,
+// Thumbstick Effects). No fixed/clipped height — the box grows to fit
+// however many lines its label wraps to, so nothing gets cut off.
+function boxBtnClass(active: boolean) {
+  return `text-xs px-1.5 py-1.5 rounded border transition-all leading-tight break-words flex items-center justify-center text-center min-h-[2.25rem] ${active ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:text-foreground hover:border-primary/40"}`;
 }
 
 function Slider({ label, value, min, max, step, display, onChange }: {
@@ -87,9 +103,15 @@ function Dropdown({ title, icon: Icon, children }: { title: string; icon: React.
   );
 }
 
-export function ConfigPanel({ config, overrides, onChange, onResetOverrides, showButtonLabels, onToggleLabels }: Props) {
+export function ConfigPanel({ config, overrides, onChange, onResetOverrides, showButtonLabels, onToggleLabels, sections }: Props) {
   const [exporting, setExporting] = useState(false);
   const [activeTab, setActiveTab] = useState<"appearance" | "effects">("appearance");
+  const showAll = !sections;
+  const show = (key: ConfigPanelSection) => showAll || sections!.includes(key);
+  // Full studio: gated by the Appearance/Effects tab switcher. Curated
+  // (sections provided): every included section always shows, no tabs.
+  const inAppearanceTab = showAll ? activeTab === "appearance" : true;
+  const inEffectsTab = showAll ? activeTab === "effects" : true;
   const layout = LAYOUTS[config.controllerType] ?? LAYOUTS["c4d1"];
   const lStickBase = layout.sticks[0];
   const lStickEff = { ...lStickBase, ...(overrides.sticks[0] ?? {}) };
@@ -126,25 +148,32 @@ export function ConfigPanel({ config, overrides, onChange, onResetOverrides, sho
       {/* Scrollable content */}
       <div className="flex flex-col gap-2 flex-1 overflow-y-auto min-h-0">
 
-      {/* Overlay name */}
-      <div className="space-y-1">
-        <Section icon={Tag} title="Name" />
-        <input type="text" value={config.overlayName} onChange={e => onChange({ overlayName: e.target.value })}
-          placeholder="My Controller"
-          className="w-full text-xs px-2 py-1 rounded-md bg-card border border-border text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/60 transition-colors" />
-      </div>
+      {/* Overlay name — internal Studio tool only. The customer editor has
+          its own "Controller Name" field on the Finalize step instead, since
+          naming isn't an "effect" and belongs at the end of the flow. */}
+      {showAll && (
+        <div className="space-y-1">
+          <Section icon={Tag} title="Name" />
+          <input type="text" value={config.overlayName} onChange={e => onChange({ overlayName: e.target.value })}
+            placeholder="My Controller"
+            className="w-full text-xs px-2 py-1 rounded-md bg-card border border-border text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/60 transition-colors" />
+        </div>
+      )}
 
-      {/* Tab bar */}
-      <div className="flex gap-1.5">
-        {(["appearance", "effects"] as const).map(tab => (
-          <button key={tab} onClick={() => setActiveTab(tab)}
-            className={`text-xs px-2.5 py-1 rounded-md border transition-all font-medium capitalize ${activeTab === tab ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:text-foreground hover:border-primary/40"}`}>
-            {tab === "appearance" ? "Appearance" : "Effects"}
-          </button>
-        ))}
-      </div>
+      {/* Tab bar — curated mode (sections provided) skips this entirely and
+          shows every included section in one flat list instead. */}
+      {showAll && (
+        <div className="flex gap-1.5">
+          {(["appearance", "effects"] as const).map(tab => (
+            <button key={tab} onClick={() => setActiveTab(tab)}
+              className={`text-xs px-2.5 py-1 rounded-md border transition-all font-medium capitalize ${activeTab === tab ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:text-foreground hover:border-primary/40"}`}>
+              {tab === "appearance" ? "Appearance" : "Effects"}
+            </button>
+          ))}
+        </div>
+      )}
 
-      {activeTab === "appearance" && (
+      {inAppearanceTab && show("stickColors") && (
         <>
           {/* Stick Colors dropdown */}
           <Dropdown title="Stick Colors" icon={Palette}>
@@ -227,7 +256,11 @@ export function ConfigPanel({ config, overrides, onChange, onResetOverrides, sho
               </>
             )}
           </Dropdown>
+        </>
+      )}
 
+      {inAppearanceTab && show("buttonPress") && (
+        <>
           {/* Button Press dropdown */}
           <Dropdown title="Button Press" icon={Zap}>
             <div className="flex items-center gap-2">
@@ -238,98 +271,129 @@ export function ConfigPanel({ config, overrides, onChange, onResetOverrides, sho
                 <p className="text-[10px] font-mono text-muted-foreground">{buttonColorLocal}</p>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-x-3">
-              <Toggle label="Inner fade" value={config.innerFade} onChange={v => onChange({ innerFade: v })} />
-              <Toggle label="Outer fade" value={config.outerFade} onChange={v => onChange({ outerFade: v })} />
-            </div>
-            <div className="grid grid-cols-2 gap-x-3">
-              <Toggle label="Glow" value={config.glowEnabled} onChange={v => onChange({ glowEnabled: v })} />
-              <Toggle label="Stroke" value={config.strokeEnabled} onChange={v => onChange({ strokeEnabled: v })} />
-            </div>
-            {config.glowEnabled && (
-              <>
-                <Slider label="Opacity" value={config.buttonOpacity} min={0.05} max={1} step={0.05}
-                  display={`${Math.round(config.buttonOpacity * 100)}%`} onChange={v => onChange({ buttonOpacity: v })} />
-                <Slider label="Glow Spread" value={config.glowSize} min={4} max={40} step={1}
-                  display={`${config.glowSize}px`} onChange={v => onChange({ glowSize: v })} />
-              </>
-            )}
+
+            <Slider label="Color Opacity" value={config.buttonColorOpacity ?? 1} min={0.05} max={1} step={0.05}
+              display={`${Math.round((config.buttonColorOpacity ?? 1) * 100)}%`} onChange={v => onChange({ buttonColorOpacity: v })} />
+
+            <Slider label="Glow Strength" value={config.buttonGlowIntensity ?? 1} min={0.05} max={1} step={0.05}
+              display={`${Math.round((config.buttonGlowIntensity ?? 1) * 100)}%`} onChange={v => onChange({ buttonGlowIntensity: v })} />
+            <Slider label="Glow Spread" value={config.glowSize} min={2} max={40} step={1}
+              display={`${config.glowSize}px`} onChange={v => onChange({ glowSize: v })} />
+
+            <Toggle label="Fill" value={config.strokeEnabled} onChange={v => onChange({ strokeEnabled: v })} />
             {config.strokeEnabled && (
               <>
-                <Slider label="Stroke Width" value={config.strokeWidth} min={1} max={8} step={0.5}
-                  display={`${config.strokeWidth}px`} onChange={v => onChange({ strokeWidth: v })} />
                 <div className="flex items-center gap-2">
                   <input type="color" value={strokeColorLocal} onChange={e => handleStrokeColorChange(e.target.value)}
                     className="w-8 h-8 rounded cursor-pointer border border-border bg-card p-0.5 flex-none" />
                   <div>
-                    <p className="text-xs font-medium text-foreground">Stroke Color</p>
+                    <p className="text-xs font-medium text-foreground">Fill Color</p>
                     <p className="text-[10px] font-mono text-muted-foreground">{strokeColorLocal}</p>
                   </div>
                 </div>
+                <Slider label="Fill Opacity" value={config.buttonOpacity} min={0.05} max={1} step={0.05}
+                  display={`${Math.round(config.buttonOpacity * 100)}%`} onChange={v => onChange({ buttonOpacity: v })} />
               </>
             )}
           </Dropdown>
         </>
       )}
 
-      {activeTab === "effects" && (
+      {inEffectsTab && show("bodyEffects") && (
         <>
-          {/* Body Effects dropdown */}
+          {/* Body Effects dropdown — independent toggles (not mutually
+              exclusive), same pattern as Thumbstick Effects, so any
+              combination can run at once. */}
           <Dropdown title="Body Effects" icon={Sparkles}>
             <div className="grid grid-cols-2 gap-1">
               {([
-                { id: "none",           label: "None"          },
-                { id: "pulseGlow",      label: "Pulse Glow"    },
-                { id: "particles",      label: "Particles"     },
-                { id: "fire",           label: "🔥 Fire"       },
-                { id: "reactive",       label: "⚡ Reactive"   },
-                { id: "reactiveReverse",label: "🔄 Reverse"    },
-                { id: "reactiveFire",   label: "🔥 Reactive Fire" },
-                { id: "particleBurst",  label: "💥 Burst"      },
-              ] as const).map(p => (
-                <button key={p.id} onClick={() => onChange({ bodyEffect: p.id })}
-                  className={`text-xs px-1.5 py-1 rounded border transition-all ${config.bodyEffect === p.id ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:text-foreground hover:border-primary/40"}`}>
+                { id: "bodyEffectPulseGlowEnabled" as const,      label: "Pulse Glow"    },
+                { id: "bodyEffectParticlesEnabled" as const,      label: "Particles"     },
+                { id: "bodyEffectFireEnabled" as const,           label: "🔥 Fire"       },
+                { id: "bodyEffectReactiveEnabled" as const,       label: "⚡ Reactive"   },
+                { id: "bodyEffectReactiveFireEnabled" as const,   label: "🔥 Reactive Fire" },
+                { id: "bodyEffectParticleBurstEnabled" as const,  label: "💥 Burst"      },
+              ]).map(p => (
+                <button key={p.id} onClick={() => onChange({ [p.id]: !config[p.id] } as Partial<ControllerConfig>)}
+                  className={boxBtnClass(!!config[p.id])}>
                   {p.label}
                 </button>
               ))}
             </div>
-            {config.bodyEffect !== "none" && (
+            {(config.bodyEffectPulseGlowEnabled || config.bodyEffectParticlesEnabled || config.bodyEffectFireEnabled || config.bodyEffectReactiveEnabled || config.bodyEffectReactiveFireEnabled || config.bodyEffectParticleBurstEnabled) && (
               <>
-                {config.bodyEffect !== "fire" && (
-                  <Slider label="Speed" value={config.bodyEffectSpeed} min={1} max={20} step={0.5}
-                    display={`${config.bodyEffectSpeed}s`} onChange={v => onChange({ bodyEffectSpeed: v })} />
+                {/* Speed/Intensity are shared config fields across several body
+                    effects (bodyEffectSpeed / bodyEffectIntensity). Every body
+                    effect now wants the same narrow 50-100% intensity range,
+                    so that one's unconditional. Speed still varies by group:
+                    Pulse Glow alone wants 1-2s, the reactive family (Reactive/
+                    Reactive Fire/Burst) alone wants 5-10s, Particles alone
+                    keeps the general wide range — mixing effects from
+                    different speed groups falls back to that general range
+                    since one shared slider can't satisfy two ranges at once. */}
+                {(() => {
+                  const reactiveFamilyOn = config.bodyEffectReactiveEnabled || config.bodyEffectParticleBurstEnabled || config.bodyEffectReactiveFireEnabled;
+                  const speedGroupsOn = [config.bodyEffectPulseGlowEnabled, config.bodyEffectParticlesEnabled, reactiveFamilyOn].filter(Boolean).length;
+                  let speedMin = 1, speedMax = 20, speedStep = 0.5;
+                  if (speedGroupsOn === 1) {
+                    if (config.bodyEffectPulseGlowEnabled) { speedMax = 2; speedStep = 0.1; }
+                    else if (reactiveFamilyOn) { speedMin = 5; speedMax = 10; }
+                  }
+                  const showSpeed = config.bodyEffectPulseGlowEnabled || config.bodyEffectParticlesEnabled || reactiveFamilyOn;
+                  return (
+                    <>
+                      {showSpeed && (
+                        <Slider label="Speed" value={config.bodyEffectSpeed}
+                          min={speedMin} max={speedMax} step={speedStep}
+                          display={`${config.bodyEffectSpeed}s`} onChange={v => onChange({ bodyEffectSpeed: v })} />
+                      )}
+                      <Slider label="Intensity" value={config.bodyEffectIntensity}
+                        min={0.5} max={1} step={0.05}
+                        display={`${Math.round(config.bodyEffectIntensity * 100)}%`} onChange={v => onChange({ bodyEffectIntensity: v })} />
+                    </>
+                  );
+                })()}
+                {config.bodyEffectPulseGlowEnabled && (
+                  <ColorField label="Pulse Glow Color" value={config.pulseGlowColor} onChange={v => onChange({ pulseGlowColor: v })} />
                 )}
-                <Slider label="Intensity" value={config.bodyEffectIntensity} min={0.05} max={1} step={0.05}
-                  display={`${Math.round(config.bodyEffectIntensity * 100)}%`} onChange={v => onChange({ bodyEffectIntensity: v })} />
-                {config.bodyEffect === "pulseGlow" && (
-                  <ColorField label="Color" value={config.pulseGlowColor} onChange={v => onChange({ pulseGlowColor: v })} />
-                )}
-                {(config.bodyEffect === "reactive" || config.bodyEffect === "reactiveReverse" || config.bodyEffect === "particleBurst" || config.bodyEffect === "crystalFracture") && (
+                {config.bodyEffectParticlesEnabled && (
                   <>
-                    <Toggle label="Rainbow" value={config.reactiveRippleRainbow} onChange={v => onChange({ reactiveRippleRainbow: v })} />
-                    {!config.reactiveRippleRainbow && (
-                      <ColorField label="Color" value={config.reactiveRippleColor} onChange={v => onChange({ reactiveRippleColor: v })} />
+                    <Toggle label="Particles Rainbow" value={config.particlesRainbow} onChange={v => onChange({ particlesRainbow: v })} />
+                    {!config.particlesRainbow && (
+                      <ColorField label="Particles Color" value={config.particlesColor} onChange={v => onChange({ particlesColor: v })} />
                     )}
                   </>
                 )}
-                {(config.bodyEffect === "fire" || config.bodyEffect === "reactiveFire") && (
+                {(config.bodyEffectReactiveEnabled || config.bodyEffectParticleBurstEnabled) && (
+                  <>
+                    <Toggle label="Reactive Rainbow" value={config.reactiveRippleRainbow} onChange={v => onChange({ reactiveRippleRainbow: v })} />
+                    {!config.reactiveRippleRainbow && (
+                      <ColorField label="Reactive Color" value={config.reactiveRippleColor} onChange={v => onChange({ reactiveRippleColor: v })} />
+                    )}
+                  </>
+                )}
+                {(config.bodyEffectFireEnabled || config.bodyEffectReactiveFireEnabled) && (
                   <>
                     <ColorField label="Fire Color 1" value={config.fireColor1} onChange={v => onChange({ fireColor1: v })} />
                     <ColorField label="Fire Color 2" value={config.fireColor2} onChange={v => onChange({ fireColor2: v })} />
                   </>
                 )}
-                {config.bodyEffect === "fire" && (
+                {config.bodyEffectFireEnabled && (
                   <>
-                    <Slider label="Glow Speed" value={config.fireGlowSpeed} min={1} max={20} step={0.5}
+                    <Slider label="Glow Speed" value={config.fireGlowSpeed} min={1} max={10} step={0.5}
                       display={`${config.fireGlowSpeed}s`} onChange={v => onChange({ fireGlowSpeed: v })} />
-                    <Slider label="Ember Speed" value={config.fireEmberSpeed} min={1} max={20} step={0.5}
+                    <Slider label="Ember Speed" value={config.fireEmberSpeed} min={1} max={10} step={0.5}
                       display={`${config.fireEmberSpeed}s`} onChange={v => onChange({ fireEmberSpeed: v })} />
                   </>
                 )}
               </>
             )}
           </Dropdown>
+        </>
+      )}
 
+      {inEffectsTab && show("rgbBody") && (
+        <>
           {/* RGB Body dropdown */}
           <Dropdown title="RGB Body" icon={Sparkles}>
             <Toggle label="Enable RGB silhouette" value={config.rgbBodyEnabled} onChange={v => onChange({ rgbBodyEnabled: v })} />
@@ -341,7 +405,7 @@ export function ConfigPanel({ config, overrides, onChange, onResetOverrides, sho
                     { id: "breathing", label: "Breathing" },
                   ] as const).map(m => (
                     <button key={m.id} onClick={() => onChange({ rgbBodyMode: m.id })}
-                      className={`text-xs px-2 py-1.5 rounded border transition-all ${config.rgbBodyMode === m.id ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:text-foreground hover:border-primary/40"}`}>
+                      className={boxBtnClass(config.rgbBodyMode === m.id)}>
                       {m.label}
                     </button>
                   ))}
@@ -368,7 +432,90 @@ export function ConfigPanel({ config, overrides, onChange, onResetOverrides, sho
               </>
             )}
           </Dropdown>
+        </>
+      )}
 
+      {inEffectsTab && show("stickEffects") && (
+        <>
+          {/* Thumbstick Effects dropdown — comet LED / electric ring / sparks
+              around each stick's rim. Each is an independent toggle (not
+              mutually exclusive, unlike Body Effects), styled as the same
+              kind of box-button grid for visual consistency. */}
+          <Dropdown title="Thumbstick Effects" icon={Sparkles}>
+            <p className="text-xs font-medium text-foreground pb-0.5">Left Stick</p>
+            <div className="grid grid-cols-3 gap-1">
+              {([
+                { id: "leftStickCometEnabled" as const, label: "🌠 Comet" },
+                { id: "leftStickElectricEnabled" as const, label: "⚡ Electric" },
+                { id: "leftStickSparkEnabled" as const, label: "✨ Sparks" },
+              ]).map(p => (
+                <button key={p.id} onClick={() => onChange({ [p.id]: !config[p.id] } as Partial<ControllerConfig>)}
+                  className={boxBtnClass(!!config[p.id])}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            {config.leftStickCometEnabled && (
+              <>
+                <ColorField label="Comet Color" value={config.leftStickCometColor} onChange={v => onChange({ leftStickCometColor: v })} />
+                <Slider label="Comet Speed" value={config.leftStickCometSpeed} min={0.5} max={10} step={0.25}
+                  display={`${config.leftStickCometSpeed}s`} onChange={v => onChange({ leftStickCometSpeed: v })} />
+              </>
+            )}
+            {config.leftStickElectricEnabled && (
+              <>
+                <ColorField label="Electric Color" value={config.leftStickElectricColor} onChange={v => onChange({ leftStickElectricColor: v })} />
+                <Slider label="Electric Speed" value={config.leftStickElectricSpeed} min={0.5} max={10} step={0.25}
+                  display={`${config.leftStickElectricSpeed}s`} onChange={v => onChange({ leftStickElectricSpeed: v })} />
+              </>
+            )}
+            {config.leftStickSparkEnabled && (
+              <>
+                <ColorField label="Spark Color" value={config.leftStickSparkColor} onChange={v => onChange({ leftStickSparkColor: v })} />
+                <Slider label="Spark Speed" value={config.leftStickSparkSpeed} min={0.5} max={10} step={0.25}
+                  display={`${config.leftStickSparkSpeed}s`} onChange={v => onChange({ leftStickSparkSpeed: v })} />
+              </>
+            )}
+            <p className="text-xs font-medium text-foreground pb-0.5 mt-2">Right Stick</p>
+            <div className="grid grid-cols-3 gap-1">
+              {([
+                { id: "rightStickCometEnabled" as const, label: "🌠 Comet" },
+                { id: "rightStickElectricEnabled" as const, label: "⚡ Electric" },
+                { id: "rightStickSparkEnabled" as const, label: "✨ Sparks" },
+              ]).map(p => (
+                <button key={p.id} onClick={() => onChange({ [p.id]: !config[p.id] } as Partial<ControllerConfig>)}
+                  className={boxBtnClass(!!config[p.id])}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            {config.rightStickCometEnabled && (
+              <>
+                <ColorField label="Comet Color" value={config.rightStickCometColor} onChange={v => onChange({ rightStickCometColor: v })} />
+                <Slider label="Comet Speed" value={config.rightStickCometSpeed} min={0.5} max={10} step={0.25}
+                  display={`${config.rightStickCometSpeed}s`} onChange={v => onChange({ rightStickCometSpeed: v })} />
+              </>
+            )}
+            {config.rightStickElectricEnabled && (
+              <>
+                <ColorField label="Electric Color" value={config.rightStickElectricColor} onChange={v => onChange({ rightStickElectricColor: v })} />
+                <Slider label="Electric Speed" value={config.rightStickElectricSpeed} min={0.5} max={10} step={0.25}
+                  display={`${config.rightStickElectricSpeed}s`} onChange={v => onChange({ rightStickElectricSpeed: v })} />
+              </>
+            )}
+            {config.rightStickSparkEnabled && (
+              <>
+                <ColorField label="Spark Color" value={config.rightStickSparkColor} onChange={v => onChange({ rightStickSparkColor: v })} />
+                <Slider label="Spark Speed" value={config.rightStickSparkSpeed} min={0.5} max={10} step={0.25}
+                  display={`${config.rightStickSparkSpeed}s`} onChange={v => onChange({ rightStickSparkSpeed: v })} />
+              </>
+            )}
+          </Dropdown>
+        </>
+      )}
+
+      {inEffectsTab && show("settings") && (
+        <>
           {/* Settings dropdown */}
           <Dropdown title="Settings" icon={Settings}>
             <Toggle label="Watermark" value={config.showWatermark} onChange={v => onChange({ showWatermark: v })} />
@@ -377,6 +524,8 @@ export function ConfigPanel({ config, overrides, onChange, onResetOverrides, sho
               <>
                 <Slider label="Shadow Intensity" value={config.shadowIntensity} min={0.1} max={1} step={0.05}
                   display={`${Math.round(config.shadowIntensity * 100)}%`} onChange={v => onChange({ shadowIntensity: v })} />
+                <Slider label="Shadow Distance" value={config.shadowDistance ?? 16} min={1} max={40} step={1}
+                  display={`${config.shadowDistance ?? 16}px`} onChange={v => onChange({ shadowDistance: v })} />
                 <Slider label="Shadow Angle" value={config.shadowAngle} min={0} max={360} step={1}
                   display={`${config.shadowAngle}°`} onChange={v => onChange({ shadowAngle: v })} />
               </>
@@ -387,15 +536,19 @@ export function ConfigPanel({ config, overrides, onChange, onResetOverrides, sho
 
       </div>{/* end scrollable content */}
 
-      {/* Export — always pinned at bottom */}
-      <div className="space-y-1 pt-1 border-t border-border">
-        <p className="text-[10px] text-muted-foreground">OBS Browser Source: {config.width}×{Math.round(config.width * layout.skinHeight / layout.skinWidth)}</p>
-        <button onClick={handleExport} disabled={exporting}
-          className="flex items-center justify-center gap-2 w-full py-2 px-3 rounded-lg bg-primary text-primary-foreground font-semibold text-sm hover:opacity-90 active:scale-[0.98] transition-all shadow-lg shadow-primary/30 disabled:opacity-60 disabled:cursor-wait">
-          {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-          {exporting ? "Exporting…" : "Export HTML for OBS"}
-        </button>
-      </div>
+      {/* Export — always pinned at bottom, but only in the full studio.
+          Curated builds (sections provided) own their own finalize/save
+          action instead — see CustomerEditor.tsx. */}
+      {showAll && (
+        <div className="space-y-1 pt-1 border-t border-border">
+          <p className="text-[10px] text-muted-foreground">OBS Browser Source: {config.width}×{Math.round(config.width * layout.skinHeight / layout.skinWidth)}</p>
+          <button onClick={handleExport} disabled={exporting}
+            className="flex items-center justify-center gap-2 w-full py-2 px-3 rounded-lg bg-primary text-primary-foreground font-semibold text-sm hover:opacity-90 active:scale-[0.98] transition-all shadow-lg shadow-primary/30 disabled:opacity-60 disabled:cursor-wait">
+            {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            {exporting ? "Exporting…" : "Export HTML for OBS"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import { Upload, Eraser, Paintbrush, Wand2, Undo2, RotateCcw, ZoomIn, ZoomOut, Image as ImageIcon, Square, Circle, Check, X, ArrowRightCircle, MousePointer, ChevronDown } from "lucide-react";
 import { ControllerType, CONTROLLER_TYPES } from "../lib/layouts";
-import { HomeButtonZone } from "../types/config";
+import { HomeButtonZone, BezelSlot } from "../types/config";
 import { addToCustomLibrary, loadCustomLibrary, removeFromCustomLibrary, useAddToLibrary, LibraryEntry } from "./LibraryPicker";
 
 type Tool = "select" | "wand" | "erase" | "restore" | "crop-rect" | "crop-circle";
@@ -36,7 +36,7 @@ interface HomeButtonState {
   hue: number; brightness: number; contrast: number; saturate: number;
 }
 
-const BEZEL_LIBRARY = [
+export const BEZEL_LIBRARY = [
   { id: "analog-bezel",          name: "Analog Bezel",          url: "bezels/analog-bezel.png" },
   { id: "anodized",              name: "Anodized",              url: "bezels/anodized.png" },
   { id: "aurora",                name: "Aurora",                url: "bezels/aurora.png" },
@@ -78,7 +78,7 @@ const BEZEL_LIBRARY = [
 const MAX_HISTORY = 20;
 
 interface Props {
-  onExportToSkin:    (dataUrl: string, slot: ExportSlot, controllerType: ControllerType, homeButtonZone: HomeButtonZone | null) => void;
+  onExportToSkin:    (dataUrl: string, slot: ExportSlot, controllerType: ControllerType, homeButtonZone: HomeButtonZone | null, bezelSlots: BezelSlot[], baseSkinNoBezels: string | null) => void;
   onClearSlot:       (slot: ExportSlot, controllerType: ControllerType) => void;
   onExportMkbSkin:   (dataUrl: string, slot: MkbSlot) => void;
   onClearMkbSlot:    (slot: MkbSlot) => void;
@@ -165,21 +165,21 @@ function DualRow({ label, lo, hi, setLo, setHi }: {
     <div className="space-y-1.5">
       <span className="text-[10px] text-muted-foreground">{label}</span>
       {/* Start handle */}
-      <div className="grid grid-cols-[32px_1fr_40px] gap-x-1.5 items-center">
+      <div className="grid grid-cols-[32px_minmax(0,1fr)_40px] gap-x-1.5 items-center">
         <span className="text-[9px] text-muted-foreground/50 text-right">Start</span>
         <input type="range" min={0} max={255} step={1} value={lo}
           onChange={e => setLo(Number(e.target.value))}
-          className="w-full h-1 accent-primary cursor-pointer" />
+          className="w-full min-w-0 h-1 accent-primary cursor-pointer" />
         <input type="number" min={0} max={255} value={lo}
           onChange={e => setLo(Math.min(255, Math.max(0, Number(e.target.value))))}
           className="w-full text-[9px] text-right bg-muted/30 border border-border rounded px-1 py-0.5" />
       </div>
       {/* End handle (feather) */}
-      <div className="grid grid-cols-[32px_1fr_40px] gap-x-1.5 items-center">
+      <div className="grid grid-cols-[32px_minmax(0,1fr)_40px] gap-x-1.5 items-center">
         <span className="text-[9px] text-muted-foreground/50 text-right">End</span>
         <input type="range" min={0} max={255} step={1} value={hi}
           onChange={e => setHi(Number(e.target.value))}
-          className="w-full h-1 accent-primary cursor-pointer" />
+          className="w-full min-w-0 h-1 accent-primary cursor-pointer" />
         <input type="number" min={0} max={255} value={hi}
           onChange={e => setHi(Math.min(255, Math.max(0, Number(e.target.value))))}
           className="w-full text-[9px] text-right bg-muted/30 border border-border rounded px-1 py-0.5" />
@@ -206,30 +206,10 @@ const checkerStyle: React.CSSProperties = {
   backgroundColor: "#1a1a22",
 };
 
-function SlotCard({ label, value, filled, isSelected, onClick, onClear, onDirectUpload }: {
+function SlotCard({ label, value, filled, isSelected, onClick, onClear }: {
   label: string; value: string | null | undefined; filled: boolean;
   isSelected: boolean; onClick: () => void; onClear: (e: React.MouseEvent) => void;
-  onDirectUpload: (dataUrl: string) => void;
 }) {
-  const uploadRef = useRef<HTMLInputElement>(null);
-
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = "";
-    const isVid = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".webm");
-    if (isVid) {
-      onDirectUpload(URL.createObjectURL(file));
-    } else {
-      const reader = new FileReader();
-      reader.onload = ev => {
-        const result = ev.target?.result;
-        if (typeof result === "string") onDirectUpload(result);
-      };
-      reader.readAsDataURL(file);
-    }
-  }
-
   return (
     <div role="button" tabIndex={0} onClick={onClick}
       onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
@@ -258,17 +238,6 @@ function SlotCard({ label, value, filled, isSelected, onClick, onClear, onDirect
           {filled ? <><Check size={9} className="inline mr-0.5" />Ready</> : "Empty"}
         </span>
         <div className="flex items-center gap-1">
-          {/* Hidden file input — accepts PNG, WebP, JPEG, WebM */}
-          <input ref={uploadRef} type="file"
-            accept="image/png,image/webp,image/jpeg,video/webm"
-            className="hidden"
-            onChange={handleFileChange} />
-          <button
-            onClick={e => { e.stopPropagation(); uploadRef.current?.click(); }}
-            title="Upload PNG or WebM directly to this slot"
-            className="flex items-center gap-0.5 text-[9px] text-muted-foreground/60 hover:text-primary transition-colors px-1 py-0.5 rounded hover:bg-primary/10">
-            <Upload size={9} /> Upload
-          </button>
           {filled && (
             <button onClick={onClear} title="Reset slot to default"
               className="flex items-center gap-0.5 text-[9px] text-muted-foreground/60 hover:text-destructive transition-colors px-1 py-0.5 rounded hover:bg-destructive/10">
@@ -287,6 +256,17 @@ function SlotCard({ label, value, filled, isSelected, onClick, onClear, onDirect
  * This halves the image repeatedly until within 2x of the target,
  * then does a final draw — producing much sharper results on large → small scales.
  */
+/** Fits a natural (possibly non-square) image inside a square box without
+ *  stretching it — scales to the largest size that fits both dimensions and
+ *  centers it, the canvas equivalent of CSS object-fit:contain. Needed for
+ *  the home button specifically since, unlike bezels, its source assets
+ *  aren't guaranteed to be perfectly square. */
+function containInSquare(natW: number, natH: number, boxX: number, boxY: number, boxSize: number) {
+  const scale = Math.min(boxSize / natW, boxSize / natH);
+  const w = natW * scale, h = natH * scale;
+  return { x: boxX + (boxSize - w) / 2, y: boxY + (boxSize - h) / 2, w, h };
+}
+
 function drawHighQuality(
   ctx: CanvasRenderingContext2D,
   img: HTMLImageElement | HTMLCanvasElement,
@@ -384,6 +364,13 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
   const [selectedBezel, setSelectedBezel] = useState<number | null>(null);
   const bezelNextId = useRef(0);
   const bezelDragRef = useRef<{ id: number; mode: "move" | "resize"; startX: number; startY: number; origX: number; origY: number; origSize: number } | null>(null);
+  // bakeToCanvas() flattens bezels into the working canvas and clears the
+  // `bezels` state immediately — if the user then exports/saves afterward
+  // (a completely separate action, often much later), handleExportToSkin
+  // sees bezels.length === 0 and has nothing left to capture positions
+  // from. This ref remembers the slot data from the last bake so export can
+  // still pick it up even though the live bezels array is already empty.
+  const lastBakedBezelDataRef = useRef<{ slots: BezelInstance[]; baseSkinNoBezels: string; homeButtonZone: HomeButtonZone | null } | null>(null);
 
   // Bezel picker popover state
   const [showBezelPicker, setShowBezelPicker]   = useState(false);
@@ -594,6 +581,24 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
     logoDragRef.current = null;
   }
 
+  // Converts raw viewport client coordinates into the same image-space
+  // coordinates onLogoMouseMove computes for `mx`/`my` — the resize/rotate
+  // handles' onMouseDown used to store raw e.clientX/e.clientY directly as
+  // startX/startY, which onLogoMouseMove then diffed against its own
+  // properly-scaled mx/my. Whenever the on-screen canvas was displayed at a
+  // different size than the image's native resolution (i.e. scaleX/scaleY
+  // != 1), that mismatch produced a large bogus initial dx/dy the instant
+  // the drag began — before the mouse had moved at all — which is exactly
+  // what made the logo appear to auto-shrink the moment you grabbed the
+  // resize handle.
+  function toLogoSpace(clientX: number, clientY: number): [number, number] {
+    if (!containerRef.current) return [clientX, clientY];
+    const rect = containerRef.current.getBoundingClientRect();
+    const scaleX = (imgDims?.w ?? 1) / rect.width;
+    const scaleY = (imgDims?.h ?? 1) / rect.height;
+    return [(clientX - rect.left) * scaleX, (clientY - rect.top) * scaleY];
+  }
+
   // Window-level handlers used by the SVG resize/rotate handles
   function onLogoMouseMove(e: MouseEvent) {
     const drag = logoDragRef.current;
@@ -647,6 +652,27 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
         if (logoBlur > 0) ctx.filter = `blur(${logoBlur}px)`;
         ctx.drawImage(logoImgRef.current, -w/2, -h/2, w, h); ctx.restore();
       }
+    }
+
+    // Snapshot bezel slot data (position/size/material), the home button's
+    // protected zone, and the clean base BEFORE bakeBezels/bakeHomeButton
+    // mutate ctx — this is the only chance to capture them, since both
+    // overlay states get cleared right after baking and a later export (a
+    // separate action, possibly much later — e.g. "Add to Library") would
+    // otherwise see nothing for either. Previously only bezels were snapshot
+    // here, which is why a home button baked via this "Bake to Canvas"
+    // button always lost its protected-zone metadata even though its pixels
+    // were baked in fine.
+    const zoneToSnapshot: HomeButtonZone | null =
+      exportSlot === "controllerSkin" && homeButton && imgDims
+        ? {
+            xPercent: (homeButton.x / imgDims.w) * 100,
+            yPercent: (homeButton.y / imgDims.h) * 100,
+            sizePercent: (homeButton.size / imgDims.w) * 100,
+          }
+        : null;
+    if (bezels.length > 0 || zoneToSnapshot) {
+      lastBakedBezelDataRef.current = { slots: bezels, baseSkinNoBezels: source.toDataURL("image/png"), homeButtonZone: zoneToSnapshot };
     }
 
     // Then bezels and home button — same helpers the PNG/WebM export uses —
@@ -1332,11 +1358,13 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
 
   function bakeHomeButton(ctx: CanvasRenderingContext2D, done: () => void) {
     if (!homeButton || !homeButtonImgRef.current) { done(); return; }
+    const img = homeButtonImgRef.current;
     const x = homeButton.x - homeButton.size / 2, y = homeButton.y - homeButton.size / 2;
+    const fit = containInSquare(img.naturalWidth, img.naturalHeight, x, y, homeButton.size);
     ctx.save();
     const isDefault = homeButton.hue === 0 && homeButton.brightness === 1 && homeButton.contrast === 1 && homeButton.saturate === 1;
     if (!isDefault) ctx.filter = `hue-rotate(${homeButton.hue}deg) brightness(${homeButton.brightness}) contrast(${homeButton.contrast}) saturate(${homeButton.saturate})`;
-    drawHighQuality(ctx, homeButtonImgRef.current, x, y, homeButton.size, homeButton.size);
+    drawHighQuality(ctx, img, fit.x, fit.y, fit.w, fit.h);
     ctx.filter = "none";
     ctx.restore();
     done();
@@ -1410,13 +1438,24 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
       });
     }
 
-    // Pre-resize home button at canvas size using Lanczos
+    // Pre-resize home button at canvas size using Lanczos — contain-fit
+    // (not a forced square stretch) since the source asset isn't guaranteed
+    // to be square, unlike bezels.
     let homeButtonBakeBm: ImageBitmap | HTMLImageElement | null = homeButtonBakeImg;
+    let homeButtonBakeFit = { x: 0, y: 0, w: 0, h: 0 };
     if (homeButton && homeButtonBakeImg) {
+      // homeButtonBakeImg is only ever assigned inside the Promise executor
+      // callback above, which TS's control-flow narrowing can't see through
+      // (it statically treats the variable as still `null` here, narrowing
+      // this whole branch to `never`) — the runtime guard above is correct,
+      // so cast past the false-positive rather than fight the type system.
+      const hbImg = homeButtonBakeImg as HTMLImageElement;
+      const fit = containInSquare(hbImg.naturalWidth, hbImg.naturalHeight, homeButton.x - homeButton.size / 2, homeButton.y - homeButton.size / 2, homeButton.size);
+      homeButtonBakeFit = fit;
       try {
-        homeButtonBakeBm = await createImageBitmap(homeButtonBakeImg, {
-          resizeWidth: Math.round(homeButton.size),
-          resizeHeight: Math.round(homeButton.size),
+        homeButtonBakeBm = await createImageBitmap(hbImg, {
+          resizeWidth: Math.round(fit.w),
+          resizeHeight: Math.round(fit.h),
           resizeQuality: "high",
         });
       } catch { /* fallback stays as homeButtonBakeImg */ }
@@ -1520,11 +1559,10 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
 
             // ── Home button on top of bezels ─────────────────────────
             if (homeButton && homeButtonBakeBm) {
-              const hx = homeButton.x - homeButton.size / 2, hy = homeButton.y - homeButton.size / 2;
               ctx.save();
               const hbDefault = homeButton.hue === 0 && homeButton.brightness === 1 && homeButton.contrast === 1 && homeButton.saturate === 1;
               if (!hbDefault) ctx.filter = `hue-rotate(${homeButton.hue}deg) brightness(${homeButton.brightness}) contrast(${homeButton.contrast}) saturate(${homeButton.saturate})`;
-              ctx.drawImage(homeButtonBakeBm, hx, hy);
+              ctx.drawImage(homeButtonBakeBm, homeButtonBakeFit.x, homeButtonBakeFit.y, homeButtonBakeFit.w, homeButtonBakeFit.h);
               ctx.filter = "none";
               ctx.restore();
             }
@@ -1640,18 +1678,29 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
     setEncodingProgress(0);
   }
 
-  function confirmExport(dataUrl: string, slot: ExportSlot, target: ControllerType) {
+  function confirmExport(
+    dataUrl: string, slot: ExportSlot, target: ControllerType,
+    bezelSlotsSnapshot: BezelSlot[] = [], baseSkinNoBezels: string | null = null,
+    zoneOverride?: HomeButtonZone | null,
+  ) {
     // Only the controller body slot has a meaningful protected zone — a
-    // thumbstick skin doesn't have a home button on it.
-    const zone: HomeButtonZone | null =
-      slot === "controllerSkin" && homeButton && imgDims
+    // thumbstick skin doesn't have a home button on it. zoneOverride (passed
+    // by handleExportToSkin's finalize()) already accounts for a prior "Bake
+    // to Canvas" having cleared the live homeButton overlay — recomputing
+    // from scratch here would lose that the same way this used to.
+    const zone: HomeButtonZone | null = zoneOverride !== undefined
+      ? zoneOverride
+      : slot === "controllerSkin" && homeButton && imgDims
         ? {
             xPercent: (homeButton.x / imgDims.w) * 100,
             yPercent: (homeButton.y / imgDims.h) * 100,
             sizePercent: (homeButton.size / imgDims.w) * 100,
           }
         : null;
-    onExportToSkin(dataUrl, slot, target, zone);
+    // Bezel slot metadata only makes sense for the controller body itself.
+    onExportToSkin(dataUrl, slot, target, zone,
+      slot === "controllerSkin" ? bezelSlotsSnapshot : [],
+      slot === "controllerSkin" ? baseSkinNoBezels : null);
     setExportDone(true);
     setTimeout(() => setExportDone(false), 1500);
   }
@@ -1661,18 +1710,41 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
     setTimeout(() => setExportDone(false), 1500);
   }
 
-  function handleExportToSkin(onBaked?: (dataUrl: string) => void) {
+  function handleExportToSkin(onBaked?: (dataUrl: string, bezelSlots: BezelSlot[], baseSkinNoBezels: string | null, homeButtonZone: HomeButtonZone | null) => void) {
     const source = canvasRef.current;
     if (!source || !hasImage || !exportTarget) return;
 
+    // Same zone computation confirmExport does — only the controller body
+    // slot has a meaningful protected zone. Computed once here so it can be
+    // forwarded through onBaked, which previously never received it at all
+    // (only confirmExport did), meaning a home button placed before "Add to
+    // Library" never carried its protected-zone metadata forward even though
+    // the button's pixels were baked in fine.
+    // Falls back to whatever a prior "Bake to Canvas" already snapshotted —
+    // by the time this runs (e.g. from "Add to Library", possibly much
+    // later), a baked home button's live overlay state is already gone.
+    const zone: HomeButtonZone | null =
+      exportSlot === "controllerSkin" && homeButton && imgDims
+        ? {
+            xPercent: (homeButton.x / imgDims.w) * 100,
+            yPercent: (homeButton.y / imgDims.h) * 100,
+            sizePercent: (homeButton.size / imgDims.w) * 100,
+          }
+        : (exportSlot === "controllerSkin" ? lastBakedBezelDataRef.current?.homeButtonZone ?? null : null);
+
     // Routes the final payload to the correct callback — either the caller's
     // override (used by "Add to Library") or the normal skin-slot export.
-    const finalize = (dataUrl: string) => {
-      if (onBaked) { onBaked(dataUrl); return; }
+    // bezelSlotsSnapshot/baseSkinNoBezels are only populated by the call sites
+    // below that actually bake bezels — everything else passes bezels through
+    // untouched (there's nothing to snapshot when there are none). onBaked
+    // used to silently drop these two — that's exactly why bezels baked via
+    // "Add to Library" never carried their position/material forward.
+    const finalize = (dataUrl: string, bezelSlotsSnapshot: BezelSlot[] = [], baseSkinNoBezels: string | null = null) => {
+      if (onBaked) { onBaked(dataUrl, bezelSlotsSnapshot, baseSkinNoBezels, zone); return; }
       if (isMkbTarget) {
         confirmMkbExport(dataUrl, mkbSlot);
       } else {
-        confirmExport(dataUrl, exportSlot, exportTarget as ControllerType);
+        confirmExport(dataUrl, exportSlot, exportTarget as ControllerType, bezelSlotsSnapshot, baseSkinNoBezels, zone);
       }
     };
 
@@ -1709,10 +1781,13 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
     if (hasWebM) {
       window.dispatchEvent(new CustomEvent("bezel-video-loop", { detail: { loop: videoLoop } }));
       if (bezels.length === 0 && !homeButton) {
-        // No bezels or home button overlay — export the raw WebM unchanged
+        // No live bezel overlay right now, but a prior bakeToCanvas() may
+        // have already flattened one in — carry its slot data through even
+        // though there's nothing left to actually bake here.
+        const baked = lastBakedBezelDataRef.current;
         finalize(videoFileRef.current
           ? URL.createObjectURL(videoFileRef.current)
-          : videoUrl!);
+          : videoUrl!, baked?.slots ?? [], baked?.baseSkinNoBezels ?? null);
         return;
       }
       // Bezels and/or home button present — composite the current video frame
@@ -1726,13 +1801,17 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
       const tctx = tmp.getContext("2d")!;
       if (vidEl && vidEl.readyState >= 2) tctx.drawImage(vidEl, 0, 0, W, H);
       else tctx.drawImage(source, 0, 0);
-      bakeBezels(tctx, () => bakeHomeButton(tctx, () => finalize(tmp.toDataURL("image/png"))));
+      const preBakeSnapshot1 = bezels.length > 0 ? tmp.toDataURL("image/png") : null;
+      bakeBezels(tctx, () => bakeHomeButton(tctx, () => finalize(tmp.toDataURL("image/png"), bezels, preBakeSnapshot1)));
       return;
     }
     const canvas = canvasRef.current;
     if (!canvas) return;
     if (bezels.length === 0 && !homeButton) {
-      finalize(croppedResult ? croppedResult.url : canvas.toDataURL("image/png"));
+      // Same as above — no live bezel right now, but carry through a prior
+      // bakeToCanvas() bake's slot data if there is one.
+      const baked = lastBakedBezelDataRef.current;
+      finalize(croppedResult ? croppedResult.url : canvas.toDataURL("image/png"), baked?.slots ?? [], baked?.baseSkinNoBezels ?? null);
       return;
     }
     const tmp = document.createElement("canvas");
@@ -1742,12 +1821,14 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
       const img = new Image();
       img.onload = () => {
         tctx.drawImage(img, 0, 0);
-        bakeBezels(tctx, () => bakeHomeButton(tctx, () => finalize(tmp.toDataURL("image/png"))));
+        const preBakeSnapshot2 = bezels.length > 0 ? tmp.toDataURL("image/png") : null;
+        bakeBezels(tctx, () => bakeHomeButton(tctx, () => finalize(tmp.toDataURL("image/png"), bezels, preBakeSnapshot2)));
       };
       img.src = croppedResult.url;
     } else {
       tctx.drawImage(canvas, 0, 0);
-      bakeBezels(tctx, () => bakeHomeButton(tctx, () => finalize(tmp.toDataURL("image/png"))));
+      const preBakeSnapshot3 = bezels.length > 0 ? tmp.toDataURL("image/png") : null;
+      bakeBezels(tctx, () => bakeHomeButton(tctx, () => finalize(tmp.toDataURL("image/png"), bezels, preBakeSnapshot3)));
     }
   }
 
@@ -1779,13 +1860,18 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
     const name = libraryNameDraft.trim();
     setShowLibraryNamePrompt(false);
     if (!section || !name) return;
-    handleExportToSkin(async (dataUrl) => {
+    handleExportToSkin(async (dataUrl, bezelSlots, baseSkinNoBezels, homeButtonZone) => {
       if (dataUrl.startsWith("blob:")) {
         setLibraryMessage("A raw WebM without any bezel or logo baked on top can't be saved to the library (it won't survive a reload). Add a bezel or logo first, or export a still-frame PNG.");
         setTimeout(() => setLibraryMessage(null), 4000);
         return;
       }
-      const saved = await addToCustomLibrary(section, name, dataUrl);
+      // Only carries bezel/zone data for the controller body — a
+      // thumbstick/MKB library entry has no use for either.
+      const extra = section.startsWith("body-") && (bezelSlots.length > 0 || homeButtonZone)
+        ? { bezelSlots, baseSkinNoBezels: baseSkinNoBezels ?? undefined, homeButtonZone: homeButtonZone ?? undefined }
+        : undefined;
+      const saved = await addToCustomLibrary(section, name, dataUrl, extra);
       if (!saved) {
         setLibraryError(true);
         setTimeout(() => setLibraryError(false), 2500);
@@ -1816,7 +1902,7 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
   return (
     <div className="relative flex h-full min-h-0 border-2 border-black rounded-lg overflow-hidden">
       {/* Left sidebar */}
-      <div className="flex-none w-[220px] flex flex-col gap-3 p-3 border-r-2 border-black bg-card/30 overflow-y-auto">
+      <div className="flex-none w-[220px] flex flex-col gap-3 p-3 border-r-2 border-black bg-card/30 overflow-y-auto min-h-0">
 
         {/* Section header */}
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -1844,8 +1930,7 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
             <SlotCard key={slotKey}
               label={label} value={value} filled={filled} isSelected={exportSlot === slotKey}
               onClick={() => setExportSlot(slotKey)}
-              onClear={e => { e.stopPropagation(); onClearSlot(slotKey, exportTarget as ControllerType); }}
-              onDirectUpload={dataUrl => confirmExport(dataUrl, slotKey, exportTarget as ControllerType)} />
+              onClear={e => { e.stopPropagation(); onClearSlot(slotKey, exportTarget as ControllerType); }} />
           );
         })}
 
@@ -1858,8 +1943,7 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
             <SlotCard key={slotKey}
               label={label} value={value} filled={filled} isSelected={mkbSlot === slotKey}
               onClick={() => setMkbSlot(slotKey)}
-              onClear={e => { e.stopPropagation(); onClearMkbSlot(slotKey); }}
-              onDirectUpload={dataUrl => confirmMkbExport(dataUrl, slotKey)} />
+              onClear={e => { e.stopPropagation(); onClearMkbSlot(slotKey); }} />
           );
         })}
 
@@ -2164,10 +2248,20 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
                   <rect x={-dw/2} y={-dh/2} width={dw} height={dh}
                     fill="none" stroke="#e40707" strokeWidth={1.5} strokeDasharray="6 3" />
                   <circle cx={dw/2} cy={dh/2} r={6} fill="#fff" stroke="#e40707" strokeWidth={1.5} style={{ pointerEvents: "auto", cursor: "se-resize" }}
-                    onMouseDown={e => { e.stopPropagation(); logoDragRef.current = { mode: "resize", startX: e.clientX, startY: e.clientY, origPos: { ...logoPos } }; window.addEventListener("mousemove", onLogoMouseMove); window.addEventListener("mouseup", onLogoMouseUp); }} />
+                    onMouseDown={e => {
+                      e.stopPropagation();
+                      const [sx, sy] = toLogoSpace(e.clientX, e.clientY);
+                      logoDragRef.current = { mode: "resize", startX: sx, startY: sy, origPos: { ...logoPos } };
+                      window.addEventListener("mousemove", onLogoMouseMove); window.addEventListener("mouseup", onLogoMouseUp);
+                    }} />
                   <line x1={0} y1={-dh/2} x2={0} y2={-dh/2 - 14} stroke="#e40707" strokeWidth={1.5} />
                   <circle cx={0} cy={-dh/2 - 20} r={6} fill="#fff" stroke="#e40707" strokeWidth={1.5} style={{ pointerEvents: "auto", cursor: "grab" }}
-                    onMouseDown={e => { e.stopPropagation(); logoDragRef.current = { mode: "rotate", startX: e.clientX, startY: e.clientY, origPos: { ...logoPos }, startAngle: logoPos.rot }; window.addEventListener("mousemove", onLogoMouseMove); window.addEventListener("mouseup", onLogoMouseUp); }} />
+                    onMouseDown={e => {
+                      e.stopPropagation();
+                      const [sx, sy] = toLogoSpace(e.clientX, e.clientY);
+                      logoDragRef.current = { mode: "rotate", startX: sx, startY: sy, origPos: { ...logoPos }, startAngle: logoPos.rot };
+                      window.addEventListener("mousemove", onLogoMouseMove); window.addEventListener("mouseup", onLogoMouseUp);
+                    }} />
                 </g>
               </svg>
             );
@@ -2285,7 +2379,7 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
                 outlineOffset: "2px",
               }}>
               <img src={homeButton.src} alt="home button" draggable={false}
-                style={{ width:"100%", height:"100%", display:"block", pointerEvents:"none", userSelect:"none",
+                style={{ width:"100%", height:"100%", display:"block", objectFit:"contain", pointerEvents:"none", userSelect:"none",
                   filter:`hue-rotate(${homeButton.hue}deg) brightness(${homeButton.brightness}) contrast(${homeButton.contrast}) saturate(${homeButton.saturate})` }} />
               <div onMouseDown={e => { e.stopPropagation(); e.preventDefault(); beginHomeButtonDrag(e, "resize"); }}
                 style={{ position:"absolute", right:-6, bottom:-6, width:14, height:14, background:"#fff",
@@ -2354,7 +2448,7 @@ export function ImageEditor({ onExportToSkin, onClearSlot, onExportMkbSkin, onCl
         </div>
 
         {/* ── All panel sections in one scrollable block ──────────────────── */}
-        <div className="flex flex-col gap-2 p-3 overflow-y-auto flex-1 text-[10px]">
+        <div className="flex flex-col gap-2 p-3 overflow-y-auto flex-1 min-h-0 text-[10px]">
 
           {/* Logo settings — only when a logo is placed */}
           {logoSrc ? (<React.Fragment key={logoSrc}>

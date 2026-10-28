@@ -2,11 +2,11 @@ import React, { useState, useEffect } from "react";
 import { ControllerPreview } from "../components/ControllerPreview";
 import { SkinPanel } from "../components/SkinPanel";
 import { ConfigPanel } from "../components/ConfigPanel";
-import { MkbView, MkbPreset, loadMkbPresets, saveMkbPresets, BASE_KEYS, DEFAULT_MOUSE_MASKS } from "../components/MkbView";
+import { MkbView, MkbPreset, loadMkbPresets, saveMkbPresets, BASE_KEYS, DEFAULT_MOUSE_MASKS, STYLE_CODES } from "../components/MkbView";
 import { ImageEditor, MkbSlot } from "../components/ImageEditor";
-import { ControllerConfig, DEFAULT_CONFIG, LayoutOverrides, DEFAULT_OVERRIDES } from "../types/config";
+import { ControllerConfig, DEFAULT_CONFIG, LayoutOverrides, DEFAULT_OVERRIDES, migrateLegacyConfig } from "../types/config";
 import { LAYOUTS, CONTROLLER_TYPES } from "../lib/layouts";
-import { Move, Play, Save, FolderOpen, Trash2, Upload, X, ImageIcon, Loader2, Download, Film, Settings2 } from "lucide-react";
+import { Move, Play, Save, FolderOpen, Trash2, Upload, X, ImageIcon, Loader2, Download, Film, Settings2, Tag, Check } from "lucide-react";
 import { useGamepad } from "../hooks/useGamepad";
 import { useThrottledColor } from "../hooks/useThrottledColor";
 import { Popover, PopoverTrigger, PopoverContent } from "../components/ui/popover";
@@ -64,6 +64,7 @@ function loadSavedConfig(): ControllerConfig {
     for (const slot of ["controllerSkin", "leftStickSkin", "rightStickSkin"] as const) {
       if (parsed[slot] in LEGACY_ASSET_PATH_MAP) parsed[slot] = LEGACY_ASSET_PATH_MAP[parsed[slot]];
     }
+    migrateLegacyConfig(parsed);
     return { ...DEFAULT_CONFIG, ...parsed };
   } catch { return DEFAULT_CONFIG; }
 }
@@ -87,11 +88,12 @@ interface MkbSettings {
   keyPressOpacity: number;
   keyPressGlow: number;
   kbOpacity: number; kbGlow: number;
-  mouseOpacity: number; mouseGlow: number; mouseInnerFade: boolean; mouseOuterFade: boolean;
+  mouseOpacity: number; mouseGlow: number; mouseInnerFade: boolean; mouseOuterFade: boolean; mouseSnapBack: boolean;
   mouseRgbEnabled: boolean; mouseRgbMode: "wave"|"breathing"; mouseRgbSpeed: number;
   mouseRgbIntensity: number; mouseRgbColor: string; mouseRgbRainbow: boolean;
-  mkbShowShadow: boolean; mkbShadowIntensity: number; mkbShadowAngle: number;
+  mkbShowShadow: boolean; mkbShadowIntensity: number; mkbShadowDistance: number; mkbShadowAngle: number;
   mkbWidth: number; mkbHeight: number;
+  mkbOverlayName: string;
 }
 const DEFAULT_MKB_SETTINGS: MkbSettings = {
   kbSkinUrl: "mkb/keyboard-empty.png", kbButtonsUrl: "mkb/keyboard-buttons.png", mouseSkinUrl: "mkb/mouse.png",
@@ -102,11 +104,12 @@ const DEFAULT_MKB_SETTINGS: MkbSettings = {
   keyPressOpacity: 1,
   keyPressGlow: 8,
   kbOpacity: 0.85, kbGlow: 8,
-  mouseOpacity: 1.0, mouseGlow: 6, mouseInnerFade: false, mouseOuterFade: false,
+  mouseOpacity: 1.0, mouseGlow: 6, mouseInnerFade: false, mouseOuterFade: false, mouseSnapBack: true,
   mouseRgbEnabled: false, mouseRgbMode: "wave", mouseRgbSpeed: 6,
   mouseRgbIntensity: 1, mouseRgbColor: "#e40707", mouseRgbRainbow: true,
-  mkbShowShadow: false, mkbShadowIntensity: 0.8, mkbShadowAngle: 180,
-  mkbWidth: 2560, mkbHeight: 1440,
+  mkbShowShadow: false, mkbShadowIntensity: 0.8, mkbShadowDistance: 12, mkbShadowAngle: 180,
+  mkbWidth: 1920, mkbHeight: 1080,
+  mkbOverlayName: "My Keyboard",
 };
 const MKB_SETTINGS_KEY = "css-mkb-settings";
 function loadMkbSettings(): MkbSettings {
@@ -126,15 +129,17 @@ function loadMkbSettings(): MkbSettings {
       // Explicit fallbacks for fields that may be missing in old saved data
       mkbShowShadow: parsed.mkbShowShadow ?? DEFAULT_MKB_SETTINGS.mkbShowShadow,
       mkbShadowIntensity: parsed.mkbShadowIntensity ?? DEFAULT_MKB_SETTINGS.mkbShadowIntensity,
+      mkbShadowDistance: parsed.mkbShadowDistance ?? DEFAULT_MKB_SETTINGS.mkbShadowDistance,
       mkbShadowAngle: parsed.mkbShadowAngle ?? DEFAULT_MKB_SETTINGS.mkbShadowAngle,
       keyPressOpacity: parsed.keyPressOpacity ?? DEFAULT_MKB_SETTINGS.keyPressOpacity,
       keyPressGlow: parsed.keyPressGlow ?? DEFAULT_MKB_SETTINGS.keyPressGlow,
-      // One-time bump — a saved size still sitting at the *old* default
-      // (1920x1080) was never deliberately chosen, just inherited from
-      // DEFAULT_MKB_SETTINGS before it changed to 2560x1440. Anything else
-      // (an actual custom size) is left alone.
-      mkbWidth: (parsed.mkbWidth === 1920 && parsed.mkbHeight === 1080) ? DEFAULT_MKB_SETTINGS.mkbWidth : (parsed.mkbWidth ?? DEFAULT_MKB_SETTINGS.mkbWidth),
-      mkbHeight: (parsed.mkbWidth === 1920 && parsed.mkbHeight === 1080) ? DEFAULT_MKB_SETTINGS.mkbHeight : (parsed.mkbHeight ?? DEFAULT_MKB_SETTINGS.mkbHeight),
+      mkbOverlayName: parsed.mkbOverlayName ?? DEFAULT_MKB_SETTINGS.mkbOverlayName,
+      // One-time revert — a saved size sitting at 2560x1440 was never
+      // deliberately chosen (there's no size picker in the UI), just
+      // inherited from a since-reverted default. Anything else (an actual
+      // custom size) is left alone.
+      mkbWidth: (parsed.mkbWidth === 2560 && parsed.mkbHeight === 1440) ? DEFAULT_MKB_SETTINGS.mkbWidth : (parsed.mkbWidth ?? DEFAULT_MKB_SETTINGS.mkbWidth),
+      mkbHeight: (parsed.mkbWidth === 2560 && parsed.mkbHeight === 1440) ? DEFAULT_MKB_SETTINGS.mkbHeight : (parsed.mkbHeight ?? DEFAULT_MKB_SETTINGS.mkbHeight),
     };
   } catch { return DEFAULT_MKB_SETTINGS; }
 }
@@ -166,7 +171,7 @@ export function Studio() {
 
   // Images exported from the Editor tab for controllers other than the
   // currently-active one; applied automatically when that controller is opened.
-  const [pendingSkins, setPendingSkins] = useState<Partial<Record<string, Partial<Pick<ControllerConfig, "controllerSkin" | "leftStickSkin" | "rightStickSkin" | "homeButtonZone">>>>>({});
+  const [pendingSkins, setPendingSkins] = useState<Partial<Record<string, Partial<Pick<ControllerConfig, "controllerSkin" | "leftStickSkin" | "rightStickSkin" | "homeButtonZone" | "bezelSlots" | "baseSkinNoBezels">>>>>({});
 
   // MKB skins
   const [mkbSettingsInit] = useState(loadMkbSettings);
@@ -187,7 +192,11 @@ export function Studio() {
   const [keyPressGlow, setKeyPressGlow] = useState(mkbSettingsInit.keyPressGlow);
   const [mkbRgbStyle, setMkbRgbStyle] = useState<1|2|3>(mkbSettingsInit.mkbRgbStyle);
   const [mkbRainbow, setMkbRainbow] = useState(mkbSettingsInit.mkbRainbow);
-  const [kbRgbVisible, setKbRgbVisible] = useState(true);
+  // Off is off, no matter what — the LED is the master switch for whether
+  // the keyboard RGB shows at all, so this has to start false until a style
+  // key (Digit6/7/8) is actually pressed to turn an LED on, not default to
+  // showing RGB backlight while every LED still reads as unlit.
+  const [kbRgbVisible, setKbRgbVisible] = useState(false);
   const [mouseColor, setMouseColor] = useState(mkbSettingsInit.mouseColor);
   // Keyboard appearance
   const [kbOpacity, setKbOpacity] = useState(mkbSettingsInit.kbOpacity);
@@ -197,6 +206,7 @@ export function Studio() {
   const [mouseGlow, setMouseGlow] = useState(mkbSettingsInit.mouseGlow);
   const [mouseInnerFade, setMouseInnerFade] = useState(mkbSettingsInit.mouseInnerFade);
   const [mouseOuterFade, setMouseOuterFade] = useState(mkbSettingsInit.mouseOuterFade);
+  const [mouseSnapBack, setMouseSnapBack] = useState(mkbSettingsInit.mouseSnapBack);
   const [mouseRgbEnabled, setMouseRgbEnabled] = useState(mkbSettingsInit.mouseRgbEnabled);
   const [mouseRgbMode, setMouseRgbMode] = useState<"wave"|"breathing">(mkbSettingsInit.mouseRgbMode);
   const [mouseRgbSpeed, setMouseRgbSpeed] = useState(mkbSettingsInit.mouseRgbSpeed);
@@ -205,9 +215,11 @@ export function Studio() {
   const [mouseRgbRainbow, setMouseRgbRainbow] = useState(mkbSettingsInit.mouseRgbRainbow);
   const [mkbShowShadow, setMkbShowShadow] = useState(mkbSettingsInit.mkbShowShadow);
   const [mkbShadowIntensity, setMkbShadowIntensity] = useState(mkbSettingsInit.mkbShadowIntensity);
+  const [mkbShadowDistance, setMkbShadowDistance] = useState(mkbSettingsInit.mkbShadowDistance);
   const [mkbShadowAngle, setMkbShadowAngle] = useState(mkbSettingsInit.mkbShadowAngle);
   const [mkbWidth, setMkbWidth] = useState(mkbSettingsInit.mkbWidth);
   const [mkbHeight, setMkbHeight] = useState(mkbSettingsInit.mkbHeight);
+  const [mkbOverlayName, setMkbOverlayName] = useState(mkbSettingsInit.mkbOverlayName);
 
   // Controller presets
   const [ctrlPresets, setCtrlPresets] = useState<CtrlPreset[]>([]);
@@ -217,6 +229,13 @@ export function Studio() {
   const [showPresets, setShowPresets] = useState(false);
   const [showSaveInput, setShowSaveInput] = useState(false);
   const [saveInput, setSaveInput] = useState("");
+  // Identifies the currently-active preset (by its unique savedAt timestamp)
+  // so the dropdown can highlight which one is currently loaded. Separate
+  // per mode since a controller preset and an MKB preset are never the same
+  // list; null means "no preset currently active" (e.g. after manual edits
+  // to a fresh/default state, or after switching to a type/mode with none loaded).
+  const [activeCtrlPresetAt, setActiveCtrlPresetAt] = useState<number | null>(null);
+  const [activeMkbPresetAt, setActiveMkbPresetAt] = useState<number | null>(null);
 
   // MKB key/mask overrides lifted up from MkbView so header save can access them
   const [keyOverrides, setKeyOverrides] = useState<Record<string,{cx:number;cy:number;w:number;h:number}>>({});
@@ -259,20 +278,20 @@ export function Studio() {
       mkbColor, mkbRgbStyle, mkbRainbow, mouseColor,
       keyPressColor, keyPressOpacity, keyPressGlow,
       kbOpacity, kbGlow,
-      mouseOpacity, mouseGlow, mouseInnerFade, mouseOuterFade,
+      mouseOpacity, mouseGlow, mouseInnerFade, mouseOuterFade, mouseSnapBack,
       mouseRgbEnabled, mouseRgbMode, mouseRgbSpeed, mouseRgbIntensity, mouseRgbColor, mouseRgbRainbow,
-      mkbShowShadow, mkbShadowIntensity, mkbShadowAngle,
-      mkbWidth, mkbHeight,
+      mkbShowShadow, mkbShadowIntensity, mkbShadowDistance, mkbShadowAngle,
+      mkbWidth, mkbHeight, mkbOverlayName,
     });
   }, [kbSkinUrl, kbButtonsUrl, mouseSkinUrl,
       kbSkinVideoFit, kbSkinContrast, kbSkinSaturate,
       mouseSkinVideoFit, mouseSkinContrast, mouseSkinSaturate,
       mkbColor, mkbRgbStyle, mkbRainbow, mouseColor,
       keyPressColor, keyPressOpacity, keyPressGlow,
-      kbOpacity, kbGlow, mouseOpacity, mouseGlow, mouseInnerFade, mouseOuterFade,
+      kbOpacity, kbGlow, mouseOpacity, mouseGlow, mouseInnerFade, mouseOuterFade, mouseSnapBack,
       mouseRgbEnabled, mouseRgbMode, mouseRgbSpeed, mouseRgbIntensity, mouseRgbColor, mouseRgbRainbow,
-      mkbShowShadow, mkbShadowIntensity, mkbShadowAngle,
-      mkbWidth, mkbHeight]);
+      mkbShowShadow, mkbShadowIntensity, mkbShadowDistance, mkbShadowAngle,
+      mkbWidth, mkbHeight, mkbOverlayName]);
 
   // One-time restore on mount — resumes the most recently saved preset's
   // overrides/settings, same as the old synchronous localStorage read used
@@ -326,6 +345,8 @@ export function Studio() {
       // A layout's default skin has no home button placed on it — only a
       // pending custom bake carries protected-zone data.
       homeButtonZone: pending?.homeButtonZone ?? null,
+      bezelSlots: pending?.bezelSlots ?? [],
+      baseSkinNoBezels: pending?.baseSkinNoBezels ?? null,
     });
     if (pending) {
       setPendingSkins(prev => {
@@ -342,18 +363,23 @@ export function Studio() {
   // image to the chosen skin slot for the target controller, without leaving the editor.
   // If exporting to the currently-active controller, applies immediately via handleChange.
   // Otherwise stores it in pendingSkins so it's applied when that controller is next opened.
-  function handleExportFromEditor(dataUrl: string, slot: "controllerSkin" | "leftStickSkin" | "rightStickSkin", controllerType: string, homeButtonZone: ControllerConfig["homeButtonZone"]) {
+  function handleExportFromEditor(
+    dataUrl: string, slot: "controllerSkin" | "leftStickSkin" | "rightStickSkin", controllerType: string,
+    homeButtonZone: ControllerConfig["homeButtonZone"],
+    bezelSlots: ControllerConfig["bezelSlots"], baseSkinNoBezels: ControllerConfig["baseSkinNoBezels"],
+  ) {
     // Use configRef.current (not the closed-over `config`) so this always reads
     // the live controllerType even if called from an async callback or stale closure.
+    const bezelExtras = slot === "controllerSkin" ? { homeButtonZone, bezelSlots, baseSkinNoBezels } : {};
     if (controllerType === configRef.current.controllerType) {
-      handleChange({ [slot]: dataUrl, ...(slot === "controllerSkin" ? { homeButtonZone } : {}) });
+      handleChange({ [slot]: dataUrl, ...bezelExtras });
     } else {
       setPendingSkins(prev => ({
         ...prev,
         [controllerType]: {
           ...(prev[controllerType] ?? {}),
           [slot]: dataUrl,
-          ...(slot === "controllerSkin" ? { homeButtonZone } : {}),
+          ...bezelExtras,
         },
       }));
     }
@@ -370,13 +396,14 @@ export function Studio() {
     };
     if (controllerType === configRef.current.controllerType) {
       // Resetting the controller body back to the layout default also clears
-      // the protected zone — the default skin has no home button on it.
-      handleChange({ [slot]: defaults[slot], ...(slot === "controllerSkin" ? { homeButtonZone: null } : {}) });
+      // the protected zone and any bezel slot metadata — the default skin
+      // has no home button or bezels on it.
+      handleChange({ [slot]: defaults[slot], ...(slot === "controllerSkin" ? { homeButtonZone: null, bezelSlots: [], baseSkinNoBezels: null } : {}) });
     } else {
       setPendingSkins(prev => {
         const existing = { ...(prev[controllerType] ?? {}) };
         delete existing[slot];
-        if (slot === "controllerSkin") delete existing.homeButtonZone;
+        if (slot === "controllerSkin") { delete existing.homeButtonZone; delete existing.bezelSlots; delete existing.baseSkinNoBezels; }
         return Object.keys(existing).length > 0
           ? { ...prev, [controllerType]: existing }
           : (({ [controllerType]: _, ...rest }) => rest)(prev);
@@ -417,23 +444,26 @@ export function Studio() {
     const name = saveInput.trim();
     if (mkbMode) {
       const n = name || `MKB Preset ${mkbPresets.length + 1}`;
+      const savedAt = Date.now();
       const updated = [{
         name: n, keyOverrides, mouseOverrides,
+        kbSkinUrl, kbButtonsUrl, mouseSkinUrl,
         kbSkinVideoFit, kbSkinContrast, kbSkinSaturate,
         mouseSkinVideoFit, mouseSkinContrast, mouseSkinSaturate,
         mkbColor, mkbRgbStyle, mkbRainbow, mouseColor,
         keyPressColor, keyPressOpacity, keyPressGlow,
-        kbOpacity, kbGlow, mouseOpacity, mouseGlow, mouseInnerFade, mouseOuterFade,
+        kbOpacity, kbGlow, mouseOpacity, mouseGlow, mouseInnerFade, mouseOuterFade, mouseSnapBack,
         mouseRgbEnabled, mouseRgbMode, mouseRgbSpeed, mouseRgbIntensity, mouseRgbColor, mouseRgbRainbow,
-        mkbShowShadow, mkbShadowIntensity, mkbShadowAngle,
+        mkbShowShadow, mkbShadowIntensity, mkbShadowDistance, mkbShadowAngle,
         mkbWidth, mkbHeight,
-        savedAt: Date.now(),
+        savedAt,
       }, ...mkbPresets];
-      setMkbPresets(updated); await saveMkbPresets(updated);
+      setMkbPresets(updated); setActiveMkbPresetAt(savedAt); await saveMkbPresets(updated);
     } else {
       const n = name || `Preset ${ctrlPresets.length + 1}`;
-      const updated = [{ name: n, config, overrides, savedAt: Date.now() }, ...ctrlPresets];
-      setCtrlPresets(updated); await saveCtrlPresets(config.controllerType, updated);
+      const savedAt = Date.now();
+      const updated = [{ name: n, config, overrides, savedAt }, ...ctrlPresets];
+      setCtrlPresets(updated); setActiveCtrlPresetAt(savedAt); await saveCtrlPresets(config.controllerType, updated);
     }
     setSaveInput(""); setShowSaveInput(false); setShowPresets(true);
   }
@@ -470,8 +500,13 @@ export function Studio() {
         toB64(kbSkinUrl), toB64(kbButtonsUrl), toB64(mouseSkinUrl), toB64("mkb/keyboard-mask.png"), toB64("mkb/mouse-mask.png"), toB64("mkb/keyboard-black.png"),
       ]);
 
-      // Build effective key positions (with overrides)
-      const effectiveKeys = BASE_KEYS.map(k => {
+      // Build effective key positions (with overrides) — excludes the
+      // style-select keys (Digit6/7/8), which drive the LED indicators only
+      // and were never meant to get the normal per-key press-glow box (the
+      // live preview already excludes them the same way; this export was
+      // using the keys unfiltered, so pressing 6/7/8 drew a glowing box
+      // right on top of the LED).
+      const effectiveKeys = BASE_KEYS.filter(k => !STYLE_CODES.includes(k.code)).map(k => {
         const ov = keyOverridesRef.current[k.code];
         return { code: k.code, cx: ov?.cx ?? k.cx, cy: ov?.cy ?? k.cy, w: ov?.w ?? k.w, h: ov?.h ?? k.h };
       });
@@ -495,8 +530,14 @@ export function Studio() {
 
       const kbW = Math.round(mkbWidth * 0.66);
       const kbH = Math.round(kbW * 799 / 1344);
-      const mouseW = Math.round(mkbWidth * 0.30);
-      const mouseH = Math.round(mouseW * 1.27);
+      // Derived from kbW using MkbView.tsx's exact fixed reference sizes
+      // (800px keyboard, 294px mouse) instead of its own independent
+      // mkbWidth*0.30 — that gave a kb:mouse ratio of 0.66:0.30 (2.2:1)
+      // instead of the preview's real 800:294 (~2.72:1), which is what was
+      // making the mouse render proportionally bigger next to the keyboard
+      // here than it does in Studio's live preview.
+      const mouseW = Math.round(kbW * 294 / 800);
+      const mouseH = Math.round(mouseW * 392 / 294);
       const rc = parseInt(mkbColor.slice(1,3)||"ff",16);
       const gc = parseInt(mkbColor.slice(3,5)||"ff",16);
       const bcv = parseInt(mkbColor.slice(5,7)||"ff",16);
@@ -516,8 +557,8 @@ export function Studio() {
       // Drop shadow — mirrors the filter formula applied to `.kb`/mouse wrap in the live MkbView preview
       const mkbShadowFilter = mkbShowShadow ? (() => {
         const rad = (mkbShadowAngle * Math.PI) / 180;
-        const sx = Math.round(Math.sin(rad) * 12 * mkbShadowIntensity);
-        const sy = Math.round(Math.cos(rad) * 12 * mkbShadowIntensity);
+        const sx = Math.round(Math.sin(rad) * mkbShadowDistance);
+        const sy = Math.round(Math.cos(rad) * mkbShadowDistance);
         const a = mkbShadowIntensity;
         return `drop-shadow(${sx}px ${sy}px 24px rgba(0,0,0,${a})) drop-shadow(${Math.round(sx*0.4)}px ${Math.round(sy*0.4)}px 8px rgba(0,0,0,${Math.min(a+0.1,1)}))`;
       })() : "none";
@@ -559,30 +600,28 @@ export function Studio() {
 <html>
 <head><meta charset="utf-8">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
 html,body{width:${mkbWidth}px;height:${mkbHeight}px;overflow:hidden;background:transparent}
 body{display:flex;align-items:center;justify-content:center;gap:24px}
 .kb{position:relative;width:${kbW}px;height:${kbH}px;flex-shrink:0}
 .kb>*{position:absolute;top:0;left:0;width:100%;height:100%}
 .kb img{object-fit:cover}
 #kbkeys{pointer-events:none}
-.mouse-wrap{width:${mouseW}px;height:${mouseH}px;flex-shrink:0;position:relative;overflow:visible}
+.mouse-wrap{width:${mouseW}px;height:${mouseH}px;flex-shrink:0;position:relative;overflow:visible;transition:transform 0.04s ease-out;will-change:transform}
 .mouse-wrap img.mskin{width:100%;height:100%;object-fit:contain;display:block;position:relative}
 .mouse-wrap canvas#mouseRgbCv{position:absolute;inset:0;width:100%;height:100%;display:block}
 .mmask{position:absolute;object-fit:contain;opacity:0;transition:opacity 0.06s;pointer-events:none}
-#wsStatus{position:fixed;top:4px;left:4px;background:#000;color:#0f0;font-family:monospace;font-size:8px;padding:2px 5px;border-radius:3px;border:1px solid #0f0;z-index:9999;opacity:0.35}
 .led{position:absolute;transform:translate(-50%,-50%);width:4.0%;height:7.0%;border-radius:50%;background:#0a0000;pointer-events:none;z-index:1;transition:background 0.08s}
 @keyframes ledRgbCycle{0%{filter:hue-rotate(0deg) saturate(1.4)}100%{filter:hue-rotate(360deg) saturate(1.4)}}
 </style>
 </head>
 <body>
-<div id="wsStatus">WS: connecting...</div>
 <div class="kb" style="filter:${mkbShadowFilter}">
   <img src="${kbBlackB64}" style="z-index:0;object-fit:cover" />
   <canvas id="rgbcv" style="z-index:0"></canvas>
   ${kbSkinTag}
   ${keysTag}
-  <canvas id="keyglow" style="z-index:4"></canvas>
+  <div id="keydivs" style="z-index:4"></div>
   <div class="led" id="led6" style="left:72.8%;top:22.74%"></div>
   <div class="led" id="led7" style="left:77.6%;top:22.68%"></div>
   <div class="led" id="led8" style="left:82.3%;top:22.77%"></div>
@@ -593,9 +632,25 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
 </div>
 <script>
 (function(){
+  // Tell whatever's embedding this overlay in an <iframe> (the Companion's
+  // Live Preview) our actual pixel size, so it can scale to fill its box
+  // instead of assuming a fixed resolution that this export may not match.
+  if(window.parent !== window) {
+    window.parent.postMessage({ type: 'c4d-mkb-size', width: ${mkbWidth}, height: ${mkbHeight} }, '*');
+  }
+
   // ── Config (live-updatable via WebSocket from C4D Companion) ──
   var KB_W=${kbW}, KB_H=${kbH};
   var MOUSE_W=${mouseW}, MOUSE_H=${mouseH};
+  // MkbView.tsx's live preview always renders the keyboard at a fixed 800px
+  // width and the mouse at a fixed 294px width — every glow/blur/spread
+  // value on the sliders (keyPressGlow, mouseGlow, etc.) was tuned by eye
+  // against THAT fixed size. This export renders at whatever size the
+  // configured overlay width works out to (usually much larger, e.g. a
+  // 1920px-wide OBS overlay), so those same absolute-pixel values would look
+  // proportionally tiny/washed out here unless scaled up to match.
+  var KB_SCALE = KB_W / 800;
+  var MOUSE_SCALE = MOUSE_W / 294;
   var RC=${rc},GC=${gc},BC=${bcv};
   var MRC=${mrc},MGC=${mgc},MBC=${mbc};
   var RAINBOW=${mkbRainbow};
@@ -606,6 +661,7 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
   var MOUSE_OPACITY=${mouseOpacity};
   var MOUSE_INNER_FADE=${mouseInnerFade ? "true" : "false"};
   var MOUSE_OUTER_FADE=${mouseOuterFade ? "true" : "false"};
+  var MOUSE_SNAP_BACK=${mouseSnapBack ? "true" : "false"};
   var KPC=${kpc},KPG=${kpg},KPB=${kpb};
   var KEY_PRESS_OPACITY=${keyPressOpacity};
   var KEY_PRESS_GLOW=${keyPressGlow};
@@ -642,7 +698,10 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
   //    press a fresh key -> solid on that key's style; press the SAME key
   //    again -> rainbow; press it a third time -> off (RGB hidden entirely).
   var LED_ACTIVE_CODE = null, LED_ACTIVE_MODE = 0; // 0=off,1=solid,2=rainbow
-  var KB_VISIBLE = true;
+  // Off is off, no matter what — starts false (matching every LED starting
+  // unlit) instead of showing RGB backlight before any style key has ever
+  // been pressed.
+  var KB_VISIBLE = false;
   var LED_STYLE_MAP = {Digit6:1,Digit7:2,Digit8:3};
   var LED_ELS = {Digit6:document.getElementById('led6'),Digit7:document.getElementById('led7'),Digit8:document.getElementById('led8')};
   function updateLeds(){
@@ -673,18 +732,90 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
     return 'rgba('+RC+','+GC+','+BC+','+a+')';
   }
 
-  // ── Key glow canvas ──
-  var kg = document.getElementById('keyglow');
-  kg.width = KB_W; kg.height = KB_H;
-  var kctx = kg.getContext('2d');
+  // ── Key press visuals ──
+  // Real DOM elements with the exact same CSS as MkbView.tsx's KeyMarker.
+  // Its inset box-shadow, spread, transparent-until-pressed background, and
+  // scaleY squish can't be faithfully reproduced by redrawing a <canvas>
+  // every frame (canvas shadows have no spread and always fill the shape's
+  // own interior) — so these are literal <div>s instead, built once and
+  // updated on press/release, same as the live preview.
+  var keyDivs = document.getElementById('keydivs');
+  var keyEls = {};
+  KEYS.forEach(function(k){
+    var el = document.createElement('div');
+    el.style.position = 'absolute';
+    el.style.left = (k.cx - k.w/2) + '%';
+    el.style.top = (k.cy - k.h/2) + '%';
+    el.style.width = k.w + '%';
+    el.style.height = k.h + '%';
+    el.style.borderRadius = '4px';
+    el.style.transition = 'transform 0.06s cubic-bezier(0.4,0,0.2,1), box-shadow 0.06s, background 0.06s';
+    keyDivs.appendChild(el);
+    keyEls[k.code] = el;
+  });
+
+  function renderKeyVisual(code){
+    var el = keyEls[code]; if(!el) return;
+    var isCapsLock = code === 'CapsLock';
+    var isPressed = isCapsLock ? capsFlash : !!pressedKeys[code];
+    var isToggleActive = isCapsLock && capsLockOn;
+    // keyPressGlow is scaled by KB_SCALE (see above) since this export
+    // renders at a different absolute size than MkbView.tsx's fixed 800px
+    // preview reference — otherwise the exact same px glow value reads as
+    // proportionally tiny on a bigger keyboard.
+    var glow = KEY_PRESS_GLOW * KB_SCALE;
+    var glowColor = 'rgb('+KPC+','+KPG+','+KPB+')';
+    var boxShadow, background, border, transform;
+    if(isPressed){
+      boxShadow = 'inset 0 3px 8px rgba(0,0,0,0.8), inset 0 1px 3px rgba(0,0,0,0.6), 0 0 '+glow+'px '+Math.round(glow/4)+'px '+glowColor;
+      background = 'rgba(0,0,0,'+(0.5*KEY_PRESS_OPACITY)+')';
+      border = '1px solid rgba(0,0,0,0.4)';
+      transform = 'translateY(1px) scaleY(0.94)';
+    } else if(isToggleActive){
+      boxShadow = isCapsLock
+        ? 'inset 0 2px 6px rgba(0,0,0,0.8), inset 0 1px 3px rgba(0,0,0,0.6), 0 0 '+Math.round(glow/2)+'px '+Math.round(glow/6)+'px '+glowColor
+        : 'inset 0 1px 4px rgba(0,0,0,0.5), 0 0 '+Math.round(glow/2)+'px '+Math.round(glow/6)+'px '+glowColor;
+      background = 'rgba(0,0,0,'+((isCapsLock?0.5:0.25)*KEY_PRESS_OPACITY)+')';
+      border = '1px solid rgba(0,0,0,0.25)';
+      transform = 'translateY(0px) scaleY(0.98)';
+    } else {
+      boxShadow = '0 3px 6px rgba(0,0,0,0.5)';
+      background = 'transparent';
+      border = 'none';
+      transform = 'translateY(0px) scaleY(1)';
+    }
+    el.style.boxShadow = boxShadow;
+    el.style.background = background;
+    el.style.border = border;
+    el.style.transform = transform;
+  }
 
   // ── Pressed key tracking ──
   var pressedKeys = {};
   var ripples = [];
+  // CapsLock is a toggle, not a momentary press — mirrors MkbView.tsx: it
+  // never enters pressedKeys (so it never contributes a ripple to the
+  // ambient RGB canvas, and never gets the normal per-key press box below),
+  // it's driven entirely by its own capsLockOn (persists until pressed
+  // again) / capsFlash (a brief 120ms flash for the instant it's struck).
+  var capsLockOn = false, capsFlash = false, capsFlashTimer = null;
+
+  // Now that pressedKeys/capsLockOn/capsFlash exist, set every key's
+  // initial resting look.
+  KEYS.forEach(function(k){ renderKeyVisual(k.code); });
 
   function handleKeyDown(code){
+    if(code === 'CapsLock'){
+      capsLockOn = !capsLockOn;
+      capsFlash = true;
+      renderKeyVisual('CapsLock');
+      clearTimeout(capsFlashTimer);
+      capsFlashTimer = setTimeout(function(){ capsFlash = false; renderKeyVisual('CapsLock'); }, 120);
+      return;
+    }
     if(pressedKeys[code]) return;
     pressedKeys[code] = true;
+    renderKeyVisual(code);
     if(LED_STYLE_MAP[code]){
       if(LED_ACTIVE_CODE !== code){
         // Different key (or none active) — switch to solid on this key
@@ -712,49 +843,154 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
     var k = KEYS.find(function(k){ return k.code===code; });
     if(k) ripples.push({cx:k.cx/100*KB_W, cy:k.cy/100*KB_H, t:t});
   }
-  function handleKeyUp(code){ delete pressedKeys[code]; }
+  function handleKeyUp(code){ delete pressedKeys[code]; renderKeyVisual(code); }
 
   // ── Mouse tracking ──
-  var mouseX=0, mouseY=0, targetX=0, targetY=0;
-  var RADIUS=50;
+  // Position is tracked directly and clamped on every move — mirrors
+  // MkbView.tsx's MouseView exactly (posRef.current.x = clamp(posRef.current.x
+  // + e.movementX*0.5, -RADIUS, RADIUS)). This used to run the position
+  // through an extra target-chasing lerp (mouseX += (targetX-mouseX)*0.15)
+  // that the live preview never had — an entire additional stage of lag on
+  // top of what the CSS transition below already smooths, which is what
+  // made the export feel stiffer/less responsive than the preview.
+  var mouseX=0, mouseY=0;
+  // RADIUS=50 (and the 0.5 sensitivity below) are absolute px values tuned
+  // against MkbView.tsx's fixed 294px-wide mouse preview, same as
+  // keyPressGlow/mouseGlow above — scaled by MOUSE_SCALE so a given real
+  // mouse movement covers the same fraction of the container's travel
+  // space here as it does in the preview, instead of covering proportionally
+  // less of it on a bigger export render (which read as stiff/restricted).
+  var RADIUS=50*MOUSE_SCALE;
   var mouseButtons = {};
+  // Safety net: if a mousedown's matching mouseup never arrives (seen on
+  // fast double-clicks — the OS/input-hook occasionally drops the up event),
+  // the button mask would otherwise stay lit forever. Auto-release it after
+  // a beat; the timer gets cancelled/restarted by the real mouseup or the
+  // next mousedown, so this never fires during a normal press-and-hold.
+  var mouseButtonTimers = {};
+  function pressMouseButton(idx){
+    mouseButtons[idx] = true;
+    clearTimeout(mouseButtonTimers[idx]);
+    mouseButtonTimers[idx] = setTimeout(function(){ releaseMouseButton(idx); }, 600);
+  }
+  function releaseMouseButton(idx){
+    delete mouseButtons[idx];
+    clearTimeout(mouseButtonTimers[idx]);
+    updateMouseMasks();
+  }
+  // Actual wheel scrolling (spinning it, not clicking it down) — mirrors
+  // MkbView.tsx's onWheel exactly: its own 150ms decay, separate from the
+  // mousedown/mouseup safety-net timer above, since a real scroll and a
+  // real middle-click both light up the same scroll mask (idx 1) but decay
+  // on different timescales.
+  var wheelTimer = null;
+  function handleWheelScroll(){
+    mouseButtons[1] = true;
+    updateMouseMasks();
+    clearTimeout(wheelTimer);
+    wheelTimer = setTimeout(function(){ delete mouseButtons[1]; updateMouseMasks(); }, 150);
+  }
 
   function handleMouseMove(dx,dy){
-    targetX = Math.max(-RADIUS, Math.min(RADIUS, targetX + dx*0.5));
-    targetY = Math.max(-RADIUS, Math.min(RADIUS, targetY + dy*0.5));
+    mouseX = Math.max(-RADIUS, Math.min(RADIUS, mouseX + dx*0.5*MOUSE_SCALE));
+    mouseY = Math.max(-RADIUS, Math.min(RADIUS, mouseY + dy*0.5*MOUSE_SCALE));
   }
 
   // ── Build mouse mask elements ──
+  // Press look mirrors MkbView.tsx's MouseBtnPress (and the controller face
+  // buttons / keyboard keys): darkened face, inset shadow for depth, and a
+  // hollow ring in the mouse color that only glows OUTSIDE the button's own
+  // shape — instead of the old flat solid silhouette. Every layer uses the
+  // button's silhouette PNG as a CSS mask.
   var wrap = document.getElementById('mousewrap');
   var maskEls = {};
+  var PRESS_PAD = 40 * MOUSE_SCALE;
+  var PRESS_GAP = Math.max(1, 3 * MOUSE_SCALE);
+  function maskCss(imgs, sizes, composite){
+    var s = '-webkit-mask-image:'+imgs+';mask-image:'+imgs+';'
+      + '-webkit-mask-size:'+sizes+';mask-size:'+sizes+';'
+      + '-webkit-mask-position:center;mask-position:center;'
+      + '-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;';
+    if(composite) s += '-webkit-mask-composite:destination-out;mask-composite:exclude;';
+    return s;
+  }
+  function mkDiv(parent, css){
+    var d = document.createElement('div');
+    d.style.cssText = css;
+    parent.appendChild(d);
+    return d;
+  }
   MASKS.forEach(function(m){
-    var img = document.createElement('img');
-    img.src = m.b64;
-    img.className = 'mmask';
-    img.style.left = (m.cx - m.w/2) + '%';
-    img.style.top = (m.cy - m.h/2) + '%';
-    img.style.width = m.w + '%';
-    img.style.height = m.h + '%';
-    wrap.appendChild(img);
-    maskEls[m.id] = {el:img, btnIndex:m.btnIndex};
+    var shape = 'url("'+m.b64+'")';
+    var faceMask = maskCss(shape, '100% 100%', false);
+    var outsideMask = maskCss('linear-gradient(black,black), '+shape,
+      '100% 100%, calc(100% - '+(PRESS_PAD*2)+'px) calc(100% - '+(PRESS_PAD*2)+'px)', true);
+    var ringMask = maskCss(shape+', '+shape,
+      '100% 100%, calc(100% - '+(PRESS_GAP*2)+'px) calc(100% - '+(PRESS_GAP*2)+'px)', true);
+    var box = mkDiv(wrap,
+      'position:absolute;pointer-events:none;'
+      + 'left:'+(m.cx - m.w/2)+'%;top:'+(m.cy - m.h/2)+'%;width:'+m.w+'%;height:'+m.h+'%;'
+      + 'transition:transform 0.06s cubic-bezier(0.4,0,0.2,1);');
+    // The old press was an <img> with object-fit:contain, so the silhouette sat
+    // letterboxed at its own aspect ratio inside the mask's box. CSS masks
+    // stretch to fill their box, so size an inner layer holder to the exact
+    // "contain" rect once the image's natural size is known.
+    var inner = mkDiv(box, 'position:absolute;left:0;top:0;width:0;height:0;');
+    var natImg = new Image();
+    natImg.onload = function(){
+      if(!natImg.naturalWidth || !natImg.naturalHeight) return;
+      var bw = m.w/100*MOUSE_W, bh = m.h/100*MOUSE_H;
+      var fit = Math.min(bw/natImg.naturalWidth, bh/natImg.naturalHeight);
+      var cw = natImg.naturalWidth*fit, ch = natImg.naturalHeight*fit;
+      inner.style.left = ((bw-cw)/2)+'px';
+      inner.style.top = ((bh-ch)/2)+'px';
+      inner.style.width = cw+'px';
+      inner.style.height = ch+'px';
+    };
+    natImg.src = m.b64;
+    var dark = mkDiv(inner, 'position:absolute;inset:0;background:rgba(0,0,0,0);transition:background 0.06s;'+faceMask);
+    var insetClip = mkDiv(inner, 'position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity 0.06s;'+faceMask);
+    var insetIn = mkDiv(insetClip, 'position:absolute;inset:-'+PRESS_PAD+'px;background:rgba(0,0,0,0);'
+      + 'filter:blur('+(4*MOUSE_SCALE)+'px);transform:translateY('+(3*MOUSE_SCALE)+'px);'+outsideMask);
+    var ringOuter = mkDiv(inner, 'position:absolute;inset:-'+PRESS_PAD+'px;display:none;'+outsideMask);
+    var ringMid = mkDiv(ringOuter, 'position:absolute;inset:'+PRESS_PAD+'px;');
+    var ring = mkDiv(ringMid, 'position:absolute;inset:0;'+ringMask);
+    maskEls[m.id] = {box:box, dark:dark, insetClip:insetClip, insetIn:insetIn, ringOuter:ringOuter, ringMid:ringMid, ring:ring, btnIndex:m.btnIndex};
   });
 
   function updateMouseMasks(){
+    var S = MOUSE_SCALE;
+    var a = MOUSE_OPACITY;
+    function mc(alpha){ return 'rgba('+MRC+','+MGC+','+MBC+','+alpha+')'; }
+    // MOUSE_GLOW is an absolute px value tuned against MkbView.tsx's fixed
+    // 294px-wide mouse preview — scaled by MOUSE_SCALE so it still reads
+    // as the same relative glow size at this export's actual mouse size.
+    var g = Math.max(MOUSE_GLOW, 1) * S;
     Object.keys(maskEls).forEach(function(id){
       var m = maskEls[id];
-      var pressed = mouseButtons[m.btnIndex];
-      m.el.style.opacity = pressed ? MOUSE_OPACITY : 0;
-      var mouseCol = 'rgba('+MRC+','+MGC+','+MBC+',0.9)';
-      m.el.style.filter = pressed
-        ? 'drop-shadow(0 0 '+MOUSE_GLOW+'px '+mouseCol+')'
-          + (MOUSE_OUTER_FADE ? ' drop-shadow(0 0 '+(MOUSE_GLOW*2)+'px '+mouseCol+')' : '')
+      var pressed = !!mouseButtons[m.btnIndex];
+      m.box.style.transform = pressed ? 'translateY('+S+'px) scaleY(0.96)' : 'none';
+      m.dark.style.background = 'rgba(0,0,0,'+(pressed ? 0.5*a : 0)+')';
+      m.insetClip.style.opacity = pressed ? 1 : 0;
+      m.insetIn.style.background = 'rgba(0,0,0,'+(0.8*a)+')';
+      m.ringOuter.style.display = pressed ? 'block' : 'none';
+      if(pressed){
+        m.ring.style.background = mc(a);
+        m.ringMid.style.filter =
+          'blur('+(1.5*S)+'px) drop-shadow(0 0 '+(2*S)+'px rgba(255,255,255,'+(0.9*a)+')) '
+          + 'drop-shadow(0 0 '+(g*0.8)+'px '+mc(a)+') '
+          + 'drop-shadow(0 0 '+(g*1.6)+'px '+mc(0.6*a)+') '
+          + 'drop-shadow(0 0 '+(g*2.4)+'px '+mc(0.3*a)+')'
+          + (MOUSE_OUTER_FADE ? ' drop-shadow(0 0 '+(g*4)+'px '+mc(0.25*a)+')' : '')
           + (MOUSE_INNER_FADE ? ' brightness(1.3)' : '')
-        : 'none';
+          + ' drop-shadow('+(2*S)+'px '+(3*S)+'px '+(4*S)+'px rgba(0,0,0,'+(0.55*a)+'))';
+      }
     });
   }
 
   // ══ WebSocket connection to C4D Companion ══
-  // uiohook mouse button numbers: 1=left, 2=right, 3=middle/scroll, 4=side_top, 5=side_bot
+  // uiohook mouse button numbers (per libuiohook / Windows XBUTTON1/2):
+  // 1=left, 2=right, 3=middle/scroll, 4=side_bot (XBUTTON1/back), 5=side_top (XBUTTON2/forward)
   var WS_BTN_MAP = { 1:0, 2:2, 3:1, 4:3, 5:4 };
   var ws, msgCount=0;
   function connectWS(){
@@ -789,14 +1025,15 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
       if(msg.type==='mousemove'){ handleMouseMove(msg.dx, msg.dy); return; }
       if(msg.type==='mousedown'){
         var idx = WS_BTN_MAP[msg.button];
-        if(idx!=null){ mouseButtons[idx]=true; updateMouseMasks(); }
+        if(idx!=null){ pressMouseButton(idx); updateMouseMasks(); }
         return;
       }
       if(msg.type==='mouseup'){
         var idx2 = WS_BTN_MAP[msg.button];
-        if(idx2!=null){ delete mouseButtons[idx2]; updateMouseMasks(); }
+        if(idx2!=null){ releaseMouseButton(idx2); }
         return;
       }
+      if(msg.type==='wheel'){ handleWheelScroll(); return; }
     };
   }
   connectWS();
@@ -886,25 +1123,39 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
     // RGB
     ctx.clearRect(0,0,W,H);
     if(STYLE===1){
-      var b=0.35+0.65*(0.5+0.5*Math.sin(t*1.4));
-      ctx.fillStyle=getC(0,b); ctx.fillRect(0,0,W,H);
+      // Pulse — sharp attack, quick fade, like a heartbeat (mirrors MkbView.tsx exactly)
+      var raw=0.5+0.5*Math.sin(t*2.5);
+      var b=Math.pow(raw,3)*0.95; // no floor — goes fully dark at trough
+      var hue=RAINBOW?(t*0.08)%1:0; // cycle hue slowly over time when rainbow on
+      ctx.fillStyle=getC(hue,b); ctx.fillRect(0,0,W,H);
     } else if(STYLE===2){
-      for(var x=0;x<W;x+=2){
-        var h=(x/W+t*0.08)%1, bv=0.2+0.8*(0.5+0.5*Math.sin(t*2-(x/W)*Math.PI*4));
-        ctx.fillStyle=getC(h,bv); ctx.fillRect(x,0,2,H);
+      // Wave — wider columns, faster scroll (mirrors MkbView.tsx exactly).
+      // Floor raised + exponent softened — the old high-contrast falloff
+      // went fully black at every trough, reading as big dead gaps.
+      var colW=6;
+      for(var x=0;x<W;x+=colW){
+        var hue2=(x/W+t*0.15)%1;
+        var phase=(x/W)*Math.PI*6;
+        var raw2=0.5+0.5*Math.sin(t*3-phase);
+        var b2=0.18+Math.pow(raw2,1.6)*0.82;
+        ctx.fillStyle=getC(hue2,b2); ctx.fillRect(x,0,colW,H);
       }
     } else {
-      ctx.fillStyle=getC(0,0.06); ctx.fillRect(0,0,W,H);
+      // Ripple — no ambient, just expanding rings (mirrors MkbView.tsx exactly)
       var now = t;
       ripples = ripples.filter(function(r){ return now-r.t < 2.5; });
       ripples.forEach(function(rip){
-        var age=now-rip.t, radius=age*Math.max(W,H)*0.65;
-        var alpha=Math.max(0,0.9*(1-age/2.5));
-        var hue=RAINBOW?(age*0.2+rip.cx/W)%1:0;
-        var grd=ctx.createRadialGradient(rip.cx,rip.cy,radius*0.8,rip.cx,rip.cy,radius);
-        grd.addColorStop(0,getC(hue,0));
-        grd.addColorStop(0.5,getC(hue,alpha));
-        grd.addColorStop(1,getC(hue,0));
+        var age=now-rip.t;
+        var radius=age*Math.max(W,H)*0.8;
+        var alpha=Math.max(0, 1.0*(1-age/2.5));
+        var hue3=RAINBOW?(age*0.2+rip.cx/W)%1:0;
+        var thickness=Math.max(W,H)*0.08;
+        var grd=ctx.createRadialGradient(rip.cx,rip.cy,Math.max(0,radius-thickness),rip.cx,rip.cy,radius+thickness);
+        grd.addColorStop(0,   getC(hue3, 0));
+        grd.addColorStop(0.4, getC(hue3, alpha));
+        grd.addColorStop(0.5, getC(hue3, alpha*1.2));
+        grd.addColorStop(0.6, getC(hue3, alpha));
+        grd.addColorStop(1,   getC(hue3, 0));
         ctx.fillStyle=grd; ctx.fillRect(0,0,W,H);
       });
     }
@@ -914,26 +1165,9 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
       ctx.globalCompositeOperation='source-over';
     }
 
-    // Key glow
-    kctx.clearRect(0,0,W,H);
-    KEYS.forEach(function(k){
-      if(!pressedKeys[k.code]) return;
-      var x=(k.cx-k.w/2)/100*W, y=(k.cy-k.h/2)/100*H;
-      var w=k.w/100*W, h=k.h/100*H;
-      kctx.save();
-      kctx.shadowColor='rgba('+KPC+','+KPG+','+KPB+',0.9)';
-      kctx.shadowBlur=KEY_PRESS_GLOW*2;
-      kctx.fillStyle='rgba(0,0,0,'+(0.5*KEY_PRESS_OPACITY)+')';
-      kctx.beginPath();
-      kctx.roundRect(x,y,w,h,4);
-      kctx.fill();
-      kctx.restore();
-    });
-
-    // Mouse movement (decay)
-    mouseX += (targetX - mouseX) * 0.15;
-    mouseY += (targetY - mouseY) * 0.15;
-    targetX *= 0.92; targetY *= 0.92;
+    // Mouse movement (decay) — no lerp toward a target here, matches
+    // MkbView.tsx exactly: the position itself decays directly.
+    if(MOUSE_SNAP_BACK){ mouseX *= 0.92; mouseY *= 0.92; }
     wrap.style.transform = 'translate('+mouseX+'px,'+mouseY+'px)';
   }
 
@@ -951,22 +1185,21 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
       const blob = new Blob([html], { type: "text/html" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = "overlay.html";
+      a.download = `${(mkbOverlayName || "overlay").replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}.html`;
       a.click();
     } finally { setMkbExporting(false); }
   }, [kbSkinUrl, kbButtonsUrl, mouseSkinUrl, mkbWidth, mkbHeight, mkbColor, mouseColor, mkbRainbow, mkbRgbStyle, kbOpacity, kbGlow, mouseOpacity, mouseGlow,
-      mouseInnerFade, mouseOuterFade, keyPressColor, keyPressOpacity, keyPressGlow,
+      mouseInnerFade, mouseOuterFade, mouseSnapBack, keyPressColor, keyPressOpacity, keyPressGlow, mkbOverlayName,
       mouseRgbEnabled, mouseRgbMode, mouseRgbSpeed, mouseRgbIntensity, mouseRgbColor, mouseRgbRainbow,
-      mkbShowShadow, mkbShadowIntensity, mkbShadowAngle, kbSkinContrast, kbSkinSaturate, mouseSkinContrast, mouseSkinSaturate,
+      mkbShowShadow, mkbShadowIntensity, mkbShadowDistance, mkbShadowAngle, kbSkinContrast, kbSkinSaturate, mouseSkinContrast, mouseSkinSaturate,
       kbSkinVideoFit, mouseSkinVideoFit]);
 
   return (
     <div className="h-screen flex flex-col bg-background overflow-hidden">
       {/* ── Header ── */}
-      <header className="flex-none border-b border-border bg-card/60 backdrop-blur px-4 py-2 flex items-center gap-3 flex-wrap">
+      <header className="relative z-20 flex-none border-b border-border bg-card/60 backdrop-blur px-4 py-2 flex items-center gap-3 flex-wrap">
         <div className="flex flex-col items-center gap-0.5">
-          <img src="c4d_visuals.png" alt="C4D Visuals" style={{ height:"64px", width:"auto", objectFit:"contain", filter:"brightness(1.2)" }} />
-          <span className="font-bold text-[10px] tracking-widest uppercase text-muted-foreground/50">Controller Studio</span>
+          <img src="c4d_visuals.png" alt="C4D Visuals" style={{ height:"96px", width:"auto", objectFit:"contain", filter:"brightness(1.2)" }} />
         </div>
 
         {/* Controller tabs + MKB tab */}
@@ -1019,7 +1252,7 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
             <FolderOpen size={10} /> Presets {presets.length > 0 && <span className="text-primary font-bold">{presets.length}</span>}
           </button>
           {showSaveInput && (
-            <div className="absolute top-full mt-1 left-0 z-50 bg-card border border-border rounded-lg shadow-xl p-3 w-52">
+            <div className="absolute top-full mt-1 left-0 z-[999] bg-card border border-border rounded-lg shadow-xl p-3 w-52">
               <p className="text-[10px] text-muted-foreground mb-1.5">
                 Save {mkbMode ? "MKB key layout" : `for ${baseLayout.name}`}
               </p>
@@ -1034,49 +1267,68 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
             </div>
           )}
           {showPresets && presets.length > 0 && (
-            <div className="absolute top-full mt-1 left-0 z-50 bg-card border border-border rounded-lg shadow-xl w-56 overflow-hidden">
+            <div className="absolute top-full mt-1 left-0 z-[999] bg-card border border-border rounded-lg shadow-xl w-56 overflow-hidden">
               <p className="text-[10px] text-muted-foreground px-3 pt-2 pb-1.5 border-b border-border">
                 {mkbMode ? "MKB Presets" : `Presets — ${baseLayout.name}`}
               </p>
-              {(presets as any[]).map((p, i) => (
-                <div key={i} className="flex items-center px-2 py-1.5 hover:bg-muted/40 group">
+              {/* Past 5 presets, the list scrolls inside a fixed-height box
+                  (~5 rows) instead of growing the dropdown unbounded. */}
+              <div className="max-h-[150px] overflow-y-auto">
+              {(presets as any[]).map((p, i) => {
+                const isActive = p.savedAt === (mkbMode ? activeMkbPresetAt : activeCtrlPresetAt);
+                return (
+                <div key={i} className={`flex items-center px-2 py-1.5 hover:bg-muted/40 group ${isActive ? "bg-primary/10" : ""}`}>
                   <button onClick={() => {
                     if (mkbMode) {
                       // Merge over defaults first — presets saved before appearance
                       // fields were added only have keyOverrides/mouseOverrides.
                       const mp = { ...DEFAULT_MKB_SETTINGS, ...(p as MkbPreset) };
                       setKeyOverrides(mp.keyOverrides); setMouseOverrides(mp.mouseOverrides ?? []);
+                      setKbSkinUrl(mp.kbSkinUrl); setKbButtonsUrl(mp.kbButtonsUrl); setMouseSkinUrl(mp.mouseSkinUrl);
                       setKbSkinVideoFit(mp.kbSkinVideoFit); setKbSkinContrast(mp.kbSkinContrast); setKbSkinSaturate(mp.kbSkinSaturate);
                       setMouseSkinVideoFit(mp.mouseSkinVideoFit); setMouseSkinContrast(mp.mouseSkinContrast); setMouseSkinSaturate(mp.mouseSkinSaturate);
                       setMkbColor(mp.mkbColor); setMkbRgbStyle(mp.mkbRgbStyle); setMkbRainbow(mp.mkbRainbow); setMouseColor(mp.mouseColor);
                       setKeyPressColor(mp.keyPressColor); setKeyPressOpacity(mp.keyPressOpacity); setKeyPressGlow(mp.keyPressGlow);
                       setKbOpacity(mp.kbOpacity); setKbGlow(mp.kbGlow);
-                      setMouseOpacity(mp.mouseOpacity); setMouseGlow(mp.mouseGlow); setMouseInnerFade(mp.mouseInnerFade); setMouseOuterFade(mp.mouseOuterFade);
+                      setMouseOpacity(mp.mouseOpacity); setMouseGlow(mp.mouseGlow); setMouseInnerFade(mp.mouseInnerFade); setMouseOuterFade(mp.mouseOuterFade); setMouseSnapBack(mp.mouseSnapBack);
                       setMouseRgbEnabled(mp.mouseRgbEnabled); setMouseRgbMode(mp.mouseRgbMode); setMouseRgbSpeed(mp.mouseRgbSpeed);
                       setMouseRgbIntensity(mp.mouseRgbIntensity); setMouseRgbColor(mp.mouseRgbColor); setMouseRgbRainbow(mp.mouseRgbRainbow);
-                      setMkbShowShadow(mp.mkbShowShadow); setMkbShadowIntensity(mp.mkbShadowIntensity); setMkbShadowAngle(mp.mkbShadowAngle);
+                      setMkbShowShadow(mp.mkbShowShadow); setMkbShadowIntensity(mp.mkbShadowIntensity); setMkbShadowDistance(mp.mkbShadowDistance); setMkbShadowAngle(mp.mkbShadowAngle);
                       setMkbWidth(mp.mkbWidth); setMkbHeight(mp.mkbHeight);
+                      setActiveMkbPresetAt(p.savedAt);
                     } else {
                       const cp = p as CtrlPreset;
                       setOverrides(cp.overrides);
                       // Older presets (saved before this field existed) have no
                       // config snapshot — leave the current config alone rather
                       // than wiping it out with undefined.
-                      if (cp.config) setConfig({ ...DEFAULT_CONFIG, ...cp.config, controllerType: config.controllerType });
+                      if (cp.config) setConfig({ ...DEFAULT_CONFIG, ...migrateLegacyConfig({ ...cp.config }), controllerType: config.controllerType });
+                      setActiveCtrlPresetAt(p.savedAt);
                     }
                     setShowPresets(false);
-                  }} className="flex-1 text-left text-xs text-foreground truncate">
-                    {p.name} <span className="text-[10px] text-muted-foreground">{new Date(p.savedAt).toLocaleDateString()}</span>
+                  }} className={`flex-1 flex items-center gap-1 text-left text-xs truncate ${isActive ? "text-primary font-medium" : "text-foreground"}`}>
+                    {isActive ? <Check size={10} className="flex-none text-primary" /> : <span className="w-[10px] flex-none" />}
+                    <span className="truncate">{p.name}</span>
+                    <span className="text-[10px] text-muted-foreground flex-none">{new Date(p.savedAt).toLocaleDateString()}</span>
                   </button>
                   <button onClick={async () => {
                     const u = presets.filter((_, j) => j !== i);
-                    if (mkbMode) { setMkbPresets(u as MkbPreset[]); await saveMkbPresets(u as MkbPreset[]); }
-                    else { setCtrlPresets(u as CtrlPreset[]); await saveCtrlPresets(config.controllerType, u as CtrlPreset[]); }
+                    if (mkbMode) {
+                      setMkbPresets(u as MkbPreset[]);
+                      if (isActive) setActiveMkbPresetAt(null);
+                      await saveMkbPresets(u as MkbPreset[]);
+                    } else {
+                      setCtrlPresets(u as CtrlPreset[]);
+                      if (isActive) setActiveCtrlPresetAt(null);
+                      await saveCtrlPresets(config.controllerType, u as CtrlPreset[]);
+                    }
                   }} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive p-0.5 rounded">
                     <Trash2 size={10} />
                   </button>
                 </div>
-              ))}
+                );
+              })}
+              </div>
             </div>
           )}
         </div>
@@ -1113,7 +1365,7 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
         {!editorMode && (
         <>
         {/* Left panel */}
-        <aside className="w-52 flex-none border-r border-border bg-card/40 overflow-y-auto">
+        <aside className="w-52 flex-none border-r border-border bg-card/40 overflow-y-auto min-h-0">
           {mkbMode
             ? <MkbSkinPanel kbSkinUrl={kbSkinUrl} mouseSkinUrl={mouseSkinUrl} kbButtonsUrl={kbButtonsUrl}
                 onKbChange={setKbSkinUrl} onMouseChange={setMouseSkinUrl} onKbButtonsChange={setKbButtonsUrl}
@@ -1133,7 +1385,7 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
           <div className="flex-1 flex flex-col items-center justify-center p-4 gap-2 min-h-0">
             {mkbMode ? (
               <div className="flex items-center justify-center w-full flex-1 min-h-0 rounded-xl"
-                style={{ backgroundImage:"url(editor-checker-tile.png)", backgroundSize:"136px 54px", backgroundRepeat:"repeat", backgroundColor:"#1a1a22" }}>
+                style={{ backgroundImage:"url(editor-checker-tile.png)", backgroundSize:"136px 54px", backgroundRepeat:"repeat", backgroundColor:"#1a1a22", userSelect: "none", WebkitUserSelect: "none" }}>
               <div className="inline-flex">
                 <MkbView
                   color={mkbColor}
@@ -1141,10 +1393,10 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
                   keyPressOpacity={keyPressOpacity}
                   keyPressGlow={keyPressGlow}
                   kbOpacity={kbRgbVisible ? kbOpacity : 0} kbGlow={kbGlow}
-                  mouseColor={mouseColor} mouseOpacity={mouseOpacity} mouseGlow={mouseGlow} mouseInnerFade={mouseInnerFade} mouseOuterFade={mouseOuterFade}
+                  mouseColor={mouseColor} mouseOpacity={mouseOpacity} mouseGlow={mouseGlow} mouseInnerFade={mouseInnerFade} mouseOuterFade={mouseOuterFade} mouseSnapBack={mouseSnapBack}
                   mouseRgbEnabled={mouseRgbEnabled} mouseRgbMode={mouseRgbMode} mouseRgbSpeed={mouseRgbSpeed}
                   mouseRgbIntensity={mouseRgbIntensity} mouseRgbColor={mouseRgbColor} mouseRgbRainbow={mouseRgbRainbow}
-                  mkbShowShadow={mkbShowShadow} mkbShadowIntensity={mkbShadowIntensity} mkbShadowAngle={mkbShadowAngle}
+                  mkbShowShadow={mkbShowShadow} mkbShadowIntensity={mkbShadowIntensity} mkbShadowDistance={mkbShadowDistance} mkbShadowAngle={mkbShadowAngle}
                   rgbStyle={mkbRgbStyle}
                   onRgbStyleChange={(s) => { setMkbRgbStyle(s); setKbRgbVisible(true); }}
                   rainbow={mkbRainbow}
@@ -1209,6 +1461,7 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
           <div className="flex-1 overflow-hidden flex flex-col p-3">
             {mkbMode
               ? <MkbConfigPanel
+                  overlayName={mkbOverlayName} onOverlayNameChange={setMkbOverlayName}
                   color={mkbColor} onColorChange={setMkbColor}
                   keyPressColor={keyPressColor} onKeyPressColorChange={setKeyPressColor}
                   keyPressOpacity={keyPressOpacity} onKeyPressOpacity={setKeyPressOpacity}
@@ -1223,6 +1476,7 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
                   mouseGlow={mouseGlow} onMouseGlow={setMouseGlow}
                   mouseInnerFade={mouseInnerFade} onMouseInnerFade={setMouseInnerFade}
                   mouseOuterFade={mouseOuterFade} onMouseOuterFade={setMouseOuterFade}
+                  mouseSnapBack={mouseSnapBack} onMouseSnapBack={setMouseSnapBack}
                   mouseRgbEnabled={mouseRgbEnabled} onMouseRgbEnabled={setMouseRgbEnabled}
                   mouseRgbMode={mouseRgbMode} onMouseRgbMode={setMouseRgbMode}
                   mouseRgbSpeed={mouseRgbSpeed} onMouseRgbSpeed={setMouseRgbSpeed}
@@ -1231,6 +1485,7 @@ body{display:flex;align-items:center;justify-content:center;gap:24px}
                   mouseRgbRainbow={mouseRgbRainbow} onMouseRgbRainbow={setMouseRgbRainbow}
                   mkbShowShadow={mkbShowShadow} onMkbShowShadow={setMkbShowShadow}
                   mkbShadowIntensity={mkbShadowIntensity} onMkbShadowIntensity={setMkbShadowIntensity}
+                  mkbShadowDistance={mkbShadowDistance} onMkbShadowDistance={setMkbShadowDistance}
                   mkbShadowAngle={mkbShadowAngle} onMkbShadowAngle={setMkbShadowAngle}
                   kbSkinUrl={kbSkinUrl} kbButtonsUrl={kbButtonsUrl} mouseSkinUrl={mouseSkinUrl}
                   mkbWidth={mkbWidth} mkbHeight={mkbHeight}
@@ -1316,10 +1571,6 @@ function MkbUploadSlot({ label, value, defaultUrl, onUpload, onClear, accept, hi
               <div className="absolute top-1.5 left-1.5 text-[9px] bg-primary/80 text-white px-1.5 py-0.5 rounded font-medium">Template</div>
             )}
             <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button onClick={() => inputRef.current?.click()}
-                className="p-1 rounded-full bg-black/60 text-white hover:bg-primary transition-colors">
-                <Upload size={11} />
-              </button>
               {isVideo && allowVideo && (
                 <PopoverTrigger asChild>
                   <button className="p-1 rounded-full bg-black/60 text-violet-300 hover:bg-violet-600 transition-colors" title="Video options">
@@ -1420,7 +1671,7 @@ function MkbSkinPanel({ kbSkinUrl, mouseSkinUrl, kbButtonsUrl, onKbChange, onMou
         <ImageIcon size={16} className="text-primary" />
         <span className="text-sm font-semibold">MKB Skins</span>
       </div>
-      <MkbUploadSlot label="Keyboard Skin" value={kbSkinUrl} defaultUrl={DEFAULT_KB}
+      <MkbUploadSlot label="Keyboard Body" value={kbSkinUrl} defaultUrl={DEFAULT_KB}
         onUpload={onKbChange} onClear={() => onKbChange(DEFAULT_KB)}
         accept="image/png,image/jpeg,image/webp,video/webm" allowVideo
         isVideo={isVideoUrl(kbSkinUrl)}
@@ -1430,10 +1681,10 @@ function MkbSkinPanel({ kbSkinUrl, mouseSkinUrl, kbButtonsUrl, onKbChange, onMou
         onOpenLibrary={() => setShowKbLib(true)} />
       {showKbLib && (
         <LibraryPicker title="Keyboard Body Library" section="kb-body" staticEntries={KEYBOARD_BODY_LIBRARY}
-          current={kbSkinUrl} onSelect={onKbChange} onClose={() => setShowKbLib(false)} />
+          current={kbSkinUrl} onSelect={onKbChange} onClose={() => setShowKbLib(false)} allowVideo />
       )}
 
-      <MkbUploadSlot label="Keyboard Keys PNG" value={kbButtonsUrl} defaultUrl={DEFAULT_KB_BTN}
+      <MkbUploadSlot label="Keyboard Keys" value={kbButtonsUrl} defaultUrl={DEFAULT_KB_BTN}
         onUpload={onKbButtonsChange} onClear={() => onKbButtonsChange(DEFAULT_KB_BTN)}
         accept="image/png,image/jpeg,image/webp" hint="Transparent key shapes overlay"
         onOpenLibrary={() => setShowKbKeysLib(true)} />
@@ -1442,7 +1693,7 @@ function MkbSkinPanel({ kbSkinUrl, mouseSkinUrl, kbButtonsUrl, onKbChange, onMou
           current={kbButtonsUrl} onSelect={onKbButtonsChange} onClose={() => setShowKbKeysLib(false)} />
       )}
 
-      <MkbUploadSlot label="Mouse Skin" value={mouseSkinUrl} defaultUrl={DEFAULT_MOUSE}
+      <MkbUploadSlot label="Mouse" value={mouseSkinUrl} defaultUrl={DEFAULT_MOUSE}
         onUpload={onMouseChange} onClear={() => onMouseChange(DEFAULT_MOUSE)}
         accept="image/png,image/jpeg,image/webp,video/webm" allowVideo
         isVideo={isVideoUrl(mouseSkinUrl)}
@@ -1452,7 +1703,7 @@ function MkbSkinPanel({ kbSkinUrl, mouseSkinUrl, kbButtonsUrl, onKbChange, onMou
         onOpenLibrary={() => setShowMouseLib(true)} />
       {showMouseLib && (
         <LibraryPicker title="Mouse Skin Library" section="mouse" staticEntries={MOUSE_LIBRARY}
-          current={mouseSkinUrl} onSelect={onMouseChange} onClose={() => setShowMouseLib(false)} />
+          current={mouseSkinUrl} onSelect={onMouseChange} onClose={() => setShowMouseLib(false)} allowVideo />
       )}
     </div>
   );
@@ -1506,6 +1757,7 @@ function MkbDropdown({title, children}:{title:string; children:React.ReactNode})
 type RgbStyle = 1|2|3;
 
 interface MkbConfigProps {
+  overlayName: string; onOverlayNameChange: (v:string)=>void;
   color: string; onColorChange: (c:string)=>void;
   keyPressColor: string; onKeyPressColorChange: (c:string)=>void;
   keyPressOpacity: number; onKeyPressOpacity: (v:number)=>void;
@@ -1519,6 +1771,7 @@ interface MkbConfigProps {
   mouseGlow: number; onMouseGlow: (v:number)=>void;
   mouseInnerFade: boolean; onMouseInnerFade: (v:boolean)=>void;
   mouseOuterFade: boolean; onMouseOuterFade: (v:boolean)=>void;
+  mouseSnapBack: boolean; onMouseSnapBack: (v:boolean)=>void;
   mouseRgbEnabled: boolean; onMouseRgbEnabled: (v:boolean)=>void;
   mouseRgbMode: "wave"|"breathing"; onMouseRgbMode: (v:"wave"|"breathing")=>void;
   mouseRgbSpeed: number; onMouseRgbSpeed: (v:number)=>void;
@@ -1527,6 +1780,7 @@ interface MkbConfigProps {
   mouseRgbRainbow: boolean; onMouseRgbRainbow: (v:boolean)=>void;
   mkbShowShadow: boolean; onMkbShowShadow: (v:boolean)=>void;
   mkbShadowIntensity: number; onMkbShadowIntensity: (v:number)=>void;
+  mkbShadowDistance: number; onMkbShadowDistance: (v:number)=>void;
   mkbShadowAngle: number; onMkbShadowAngle: (v:number)=>void;
   keyOverrides: Record<string,{cx:number;cy:number;w:number;h:number}>;
   mouseOverrides: {id:string;cx:number;cy:number;w:number;h:number}[];
@@ -1537,13 +1791,13 @@ interface MkbConfigProps {
   exporting: boolean;
 }
 
-function MkbConfigPanel({ color, onColorChange, keyPressColor, onKeyPressColorChange, keyPressOpacity, onKeyPressOpacity, keyPressGlow, onKeyPressGlow, mouseColor, onMouseColorChange,
+function MkbConfigPanel({ overlayName, onOverlayNameChange, color, onColorChange, keyPressColor, onKeyPressColorChange, keyPressOpacity, onKeyPressOpacity, keyPressGlow, onKeyPressGlow, mouseColor, onMouseColorChange,
   rgbStyle, onRgbStyleChange, rainbow, onRainbowChange,
   kbOpacity, onKbOpacity, kbGlow, onKbGlow,
-  mouseOpacity, onMouseOpacity, mouseGlow, onMouseGlow, mouseInnerFade, onMouseInnerFade, mouseOuterFade, onMouseOuterFade,
+  mouseOpacity, onMouseOpacity, mouseGlow, onMouseGlow, mouseInnerFade, onMouseInnerFade, mouseOuterFade, onMouseOuterFade, mouseSnapBack, onMouseSnapBack,
   mouseRgbEnabled, onMouseRgbEnabled, mouseRgbMode, onMouseRgbMode, mouseRgbSpeed, onMouseRgbSpeed,
   mouseRgbIntensity, onMouseRgbIntensity, mouseRgbColor, onMouseRgbColor, mouseRgbRainbow, onMouseRgbRainbow,
-  mkbShowShadow, onMkbShowShadow, mkbShadowIntensity, onMkbShadowIntensity, mkbShadowAngle, onMkbShadowAngle,
+  mkbShowShadow, onMkbShowShadow, mkbShadowIntensity, onMkbShadowIntensity, mkbShadowDistance, onMkbShadowDistance, mkbShadowAngle, onMkbShadowAngle,
   keyOverrides, mouseOverrides,
   kbSkinUrl, kbButtonsUrl, mouseSkinUrl, mkbWidth, mkbHeight, onMkbSizeChange, onExport, exporting }: MkbConfigProps) {
   const styleLabels: Record<RgbStyle,string> = {1:"Breathe",2:"Wave",3:"Ripple"};
@@ -1564,9 +1818,31 @@ function MkbConfigPanel({ color, onColorChange, keyPressColor, onKeyPressColorCh
 
       {/* Scrollable content */}
       <div className="flex flex-col gap-3 flex-1 overflow-y-auto min-h-0">
-      {/* RGB Section */}
-      <MkbDropdown title="🌈 RGB">
-        <div className="flex flex-col gap-1.5">
+      {/* Overlay name */}
+      <div className="space-y-1">
+        <div className="flex items-center gap-1.5 pb-0.5 border-b border-border">
+          <Tag size={11} className="text-primary" />
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-foreground/60">Name</span>
+        </div>
+        <input type="text" value={overlayName} onChange={e => onOverlayNameChange(e.target.value)}
+          placeholder="My Keyboard"
+          className="w-full text-xs px-2 py-1 rounded-md bg-card border border-border text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/60 transition-colors" />
+      </div>
+
+      {/* Keyboard appearance + RGB */}
+      <MkbDropdown title="⌨️ Keyboard">
+        <div className="flex items-center gap-2">
+          <input type="color" value={keyPressColorLocal} onChange={e => handleKeyPressColorChange(e.target.value)}
+            className="w-8 h-8 rounded cursor-pointer border border-border bg-card p-0.5" />
+          <span className="text-xs font-mono text-foreground/50">{keyPressColorLocal}</span>
+          <span className="text-xs text-foreground/40">Key Press</span>
+        </div>
+        <MkbSlider label="Opacity" value={keyPressOpacity} min={0.05} max={1} step={0.05}
+          display={Math.round(keyPressOpacity*100)+"%"} onChange={onKeyPressOpacity} />
+        <MkbSlider label="Glow Strength" value={keyPressGlow} min={0} max={20} step={1}
+          display={keyPressGlow+"px"} onChange={onKeyPressGlow} />
+
+        <div className="flex flex-col gap-1.5 pt-1.5 mt-1 border-t border-border">
           {([1,2,3] as RgbStyle[]).map(s => (
             <button key={s} onClick={() => onRgbStyleChange(s)}
               className={`text-xs px-3 py-1.5 rounded-md border font-medium transition-all text-left ${rgbStyle===s ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:text-foreground"}`}>
@@ -1589,21 +1865,7 @@ function MkbConfigPanel({ color, onColorChange, keyPressColor, onKeyPressColorCh
         </div>
       </MkbDropdown>
 
-      {/* Keyboard appearance */}
-      <MkbDropdown title="⌨️ Keyboard">
-        <div className="flex items-center gap-2">
-          <input type="color" value={keyPressColorLocal} onChange={e => handleKeyPressColorChange(e.target.value)}
-            className="w-8 h-8 rounded cursor-pointer border border-border bg-card p-0.5" />
-          <span className="text-xs font-mono text-foreground/50">{keyPressColorLocal}</span>
-          <span className="text-xs text-foreground/40">Key Press</span>
-        </div>
-        <MkbSlider label="Opacity" value={keyPressOpacity} min={0.05} max={1} step={0.05}
-          display={Math.round(keyPressOpacity*100)+"%"} onChange={onKeyPressOpacity} />
-        <MkbSlider label="Glow Strength" value={keyPressGlow} min={0} max={20} step={1}
-          display={keyPressGlow+"px"} onChange={onKeyPressGlow} />
-      </MkbDropdown>
-
-      {/* Mouse */}
+      {/* Mouse appearance + RGB */}
       <MkbDropdown title="🖱️ Mouse">
         <div className="flex items-center gap-2">
           <input type="color" value={mouseColorLocal} onChange={e => handleMouseColorChange(e.target.value)}
@@ -1616,43 +1878,46 @@ function MkbConfigPanel({ color, onColorChange, keyPressColor, onKeyPressColorCh
           display={mouseGlow+"px"} onChange={onMouseGlow} />
         <MkbToggle label="Inner Fade" value={mouseInnerFade} onChange={onMouseInnerFade} />
         <MkbToggle label="Outer Fade" value={mouseOuterFade} onChange={onMouseOuterFade} />
-      </MkbDropdown>
 
-      <MkbDropdown title="🌈 Mouse RGB">
-        <MkbToggle label="Enable RGB" value={mouseRgbEnabled} onChange={onMouseRgbEnabled} />
-        {mouseRgbEnabled && (
-          <>
-            <div className="grid grid-cols-2 gap-1">
-              {(["wave","breathing"] as const).map(m=>(
-                <button key={m} onClick={()=>onMouseRgbMode(m)}
-                  className={`text-xs px-1.5 py-1 rounded border transition-all ${mouseRgbMode===m?"bg-primary text-primary-foreground border-primary":"bg-card border-border text-muted-foreground hover:text-foreground hover:border-primary/40"}`}>
-                  {m==="wave"?"Wave":"Breathing"}
-                </button>
-              ))}
-            </div>
-            <MkbSlider label="Speed" value={mouseRgbSpeed} min={1} max={20} step={0.5}
-              display={`${mouseRgbSpeed}s`} onChange={onMouseRgbSpeed} />
-            <MkbSlider label="Intensity" value={mouseRgbIntensity} min={0.05} max={1} step={0.05}
-              display={`${Math.round(mouseRgbIntensity*100)}%`} onChange={onMouseRgbIntensity} />
-            <MkbToggle label="Rainbow" value={mouseRgbRainbow} onChange={onMouseRgbRainbow} />
-            {!mouseRgbRainbow && (
-              <div className="flex items-center gap-2">
-                <input type="color" value={mouseRgbColorLocal} onChange={e=>handleMouseRgbColorChange(e.target.value)}
-                  className="w-8 h-8 rounded cursor-pointer border border-border bg-card p-0.5" />
-                <span className="text-xs font-mono text-foreground/50">{mouseRgbColorLocal}</span>
+        <div className="flex flex-col gap-1.5 pt-1.5 mt-1 border-t border-border">
+          <MkbToggle label="Enable RGB" value={mouseRgbEnabled} onChange={onMouseRgbEnabled} />
+          {mouseRgbEnabled && (
+            <>
+              <div className="grid grid-cols-2 gap-1">
+                {(["wave","breathing"] as const).map(m=>(
+                  <button key={m} onClick={()=>onMouseRgbMode(m)}
+                    className={`text-xs px-1.5 py-1 rounded border transition-all ${mouseRgbMode===m?"bg-primary text-primary-foreground border-primary":"bg-card border-border text-muted-foreground hover:text-foreground hover:border-primary/40"}`}>
+                    {m==="wave"?"Wave":"Breathing"}
+                  </button>
+                ))}
               </div>
-            )}
-          </>
-        )}
+              <MkbSlider label="Speed" value={mouseRgbSpeed} min={1} max={20} step={0.5}
+                display={`${mouseRgbSpeed}s`} onChange={onMouseRgbSpeed} />
+              <MkbSlider label="Intensity" value={mouseRgbIntensity} min={0.05} max={1} step={0.05}
+                display={`${Math.round(mouseRgbIntensity*100)}%`} onChange={onMouseRgbIntensity} />
+              <MkbToggle label="Rainbow" value={mouseRgbRainbow} onChange={onMouseRgbRainbow} />
+              {!mouseRgbRainbow && (
+                <div className="flex items-center gap-2">
+                  <input type="color" value={mouseRgbColorLocal} onChange={e=>handleMouseRgbColorChange(e.target.value)}
+                    className="w-8 h-8 rounded cursor-pointer border border-border bg-card p-0.5" />
+                  <span className="text-xs font-mono text-foreground/50">{mouseRgbColorLocal}</span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </MkbDropdown>
 
-      {/* Drop Shadow */}
-      <MkbDropdown title="💡 Drop Shadow">
+      {/* Settings */}
+      <MkbDropdown title="⚙️ Settings">
+        <MkbToggle label="Snap Back to Center" value={mouseSnapBack} onChange={onMouseSnapBack} />
         <MkbToggle label="Drop Shadow" value={mkbShowShadow} onChange={onMkbShowShadow} />
         {mkbShowShadow && (
           <>
             <MkbSlider label="Intensity" value={mkbShadowIntensity} min={0.1} max={1} step={0.05}
               display={Math.round(mkbShadowIntensity*100)+"%"} onChange={onMkbShadowIntensity} />
+            <MkbSlider label="Distance" value={mkbShadowDistance} min={1} max={40} step={1}
+              display={mkbShadowDistance+"px"} onChange={onMkbShadowDistance} />
             <MkbSlider label="Angle" value={mkbShadowAngle} min={0} max={360} step={1}
               display={mkbShadowAngle+"°"} onChange={onMkbShadowAngle} />
           </>

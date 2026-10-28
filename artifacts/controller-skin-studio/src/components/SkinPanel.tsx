@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Upload, X, ImageIcon, Film, Settings2 } from "lucide-react";
+import { Upload, X, ImageIcon, Film, Settings2, LayoutGrid } from "lucide-react";
 import { ControllerConfig, ControllerType } from "../types/config";
 import { Popover, PopoverTrigger, PopoverContent } from "./ui/popover";
 import { LibraryPicker, LibraryEntry, loadCustomLibrary, removeFromCustomLibrary, useAddToLibrary } from "./LibraryPicker";
@@ -12,13 +12,18 @@ interface Props {
   onClearSlot: (slot: "controllerSkin" | "leftStickSkin" | "rightStickSkin") => void;
 }
 
-interface UploadSlotProps {
+export interface UploadSlotProps {
   label: string;
   value: string | null;
   onUpload: (dataUrl: string) => void;
   onClear: () => void;
   hint?: string;
   onOpenLibrary?: () => void;
+  /** Defaults to the internal Studio tool's original look (Template badge on
+   *  preset values, plain "＋ Library" text link) — pass "customer" only from
+   *  the website customizer to get its pill-button/no-badge treatment.
+   *  Never change the default itself; this component is shared by both apps. */
+  variant?: "internal" | "customer";
 }
 
 // ── Thumbstick library ─────────────────────────────────────────────────────
@@ -30,9 +35,9 @@ interface UploadSlotProps {
 // C4D.1 + C4D.1 Edge  → C4D1_STICKS
 // C4D.4 + C4D.5 + C4D.5 Edge  → PS_STICKS
 
-type StickEntry = { id: string; name: string; url: string };
+export type StickEntry = { id: string; name: string; url: string };
 
-const C4D1_STICKS: StickEntry[] = [
+export const C4D1_STICKS: StickEntry[] = [
   { id:"c4d1-abyssal-iris",         name:"Abyssal Iris",      url:"sticks/c4d1-abyssal-iris.png" },
   { id:"c4d1-anodized",            name:"Anodized",          url:"sticks/c4d1-anodized.png" },
   { id:"c4d1-antique",             name:"Antique",           url:"sticks/c4d1-antique.png" },
@@ -69,7 +74,7 @@ const C4D1_STICKS: StickEntry[] = [
   { id:"c4d1-yellow-zig-zag",      name:"Yellow Zig-Zag",    url:"sticks/c4d1-yellow-zig-zag.png" },
 ];
 
-const PS_STICKS: StickEntry[] = [
+export const PS_STICKS: StickEntry[] = [
   { id:"c4d-aluminum",            name:"Aluminum",         url:"sticks/c4d-aluminum.png" },
   { id:"c4d-antique",             name:"Antique",          url:"sticks/c4d-antique.png" },
   { id:"c4d-apoxy",               name:"Apoxy",            url:"sticks/c4d-apoxy.png" },
@@ -125,13 +130,18 @@ function isVideoSkin(value: string | null): boolean {
  *  Shows both stick libraries via tabs, defaulting to whichever matches the
  *  active controller type — but either library can be picked from regardless
  *  of controller type, since a stick image has no functional tie to it. */
-function StickLibraryPicker({
-  defaultTab, current, onSelect, onClose,
+export function StickLibraryPicker({
+  defaultTab, current, onSelect, onClose, allowCustomUploads = true,
 }: {
   defaultTab: "c4d1" | "ps";
   current: string | null;
   onSelect: (url: string) => void;
   onClose: () => void;
+  /** Customer-facing editor passes false — customers pick from the existing
+   *  library only, no "＋ Add to Library" upload affordance and no removing
+   *  entries the shop already curated. Defaults to true so the internal
+   *  Studio tool's own usage is unaffected. */
+  allowCustomUploads?: boolean;
 }) {
   const [tab, setTab] = useState<"c4d1" | "ps">(defaultTab);
   const staticEntries = tab === "c4d1" ? C4D1_STICKS : PS_STICKS;
@@ -202,20 +212,24 @@ function StickLibraryPicker({
             </button>
           </div>
           <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-            <button onClick={addStickToLibrary.openPicker}
-              style={{ background:"none", border:"1px solid rgba(228,7,7,0.5)", color:"#e40707",
-                borderRadius:6, padding:"5px 10px", cursor:"pointer", fontSize:11, fontWeight:600 }}>
-              ＋ Add to Library
-            </button>
+            {allowCustomUploads && (
+              <button onClick={addStickToLibrary.openPicker}
+                style={{ background:"none", border:"1px solid rgba(228,7,7,0.5)", color:"#e40707",
+                  borderRadius:6, padding:"5px 10px", cursor:"pointer", fontSize:11, fontWeight:600 }}>
+                ＋ Add to Library
+              </button>
+            )}
             <button onClick={onClose}
               style={{ background:"none", border:"none", color:"#888", cursor:"pointer", fontSize:22, lineHeight:1 }}>×</button>
           </div>
         </div>
-        <input ref={addStickToLibrary.inputRef} type="file" accept="image/*" className="hidden"
-          onChange={addStickToLibrary.handleFile} />
+        {allowCustomUploads && (
+          <input ref={addStickToLibrary.inputRef} type="file" accept="image/*" className="hidden"
+            onChange={addStickToLibrary.handleFile} />
+        )}
 
         {/* Rename prompt — shown after picking a file, before it's actually saved */}
-        {addStickToLibrary.pendingDataUrl && (
+        {allowCustomUploads && addStickToLibrary.pendingDataUrl && (
           <div style={{ background:"rgba(255,255,255,0.05)", border:"1px solid rgba(228,7,7,0.4)",
             borderRadius:10, padding:10, display:"flex", flexDirection:"column", gap:8 }}>
             <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -264,7 +278,7 @@ function StickLibraryPicker({
                   style={{ width:84, height:84, objectFit:"contain" }} />
                 <span style={{ fontSize:10, color:"#aaa", textAlign:"center", lineHeight:1.3 }}>{entry.name}</span>
               </button>
-              {entry.id.startsWith("custom-") && (
+              {allowCustomUploads && entry.id.startsWith("custom-") && (
                 <button onClick={(e) => { e.stopPropagation(); removeCustomStick(entry.id); }}
                   title="Remove from library"
                   style={{
@@ -282,8 +296,9 @@ function StickLibraryPicker({
 }
 
 /** Simple upload slot for stick skins — includes a ＋ Library button. */
-function UploadSlot({ label, value, onUpload, onClear, hint, onOpenLibrary }: UploadSlotProps) {
+export function UploadSlot({ label, value, onUpload, onClear, hint, onOpenLibrary, variant = "internal" }: UploadSlotProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const isTemplate = variant === "internal" && value && !value.startsWith("data:");
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -297,17 +312,22 @@ function UploadSlot({ label, value, onUpload, onClear, hint, onOpenLibrary }: Up
     e.target.value = "";
   }
 
-  const isTemplate = value && !value.startsWith("data:");
-
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
         <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider leading-none">{label}</label>
         {onOpenLibrary && (
-          <button onClick={onOpenLibrary}
-            className="flex-none flex items-center gap-0.5 text-[10px] text-primary border border-primary/40 hover:bg-primary/10 px-1.5 py-0.5 rounded transition-all font-medium whitespace-nowrap">
-            ＋ Library
-          </button>
+          variant === "customer" ? (
+            <button onClick={onOpenLibrary}
+              className="flex-none flex items-center gap-1 text-[10px] font-semibold text-foreground/80 bg-white/5 border border-white/10 hover:bg-primary/15 hover:border-primary/40 hover:text-primary px-2 py-1 rounded-full transition-all whitespace-nowrap">
+              <LayoutGrid size={11} /> Library
+            </button>
+          ) : (
+            <button onClick={onOpenLibrary}
+              className="flex-none flex items-center gap-0.5 text-[10px] text-primary border border-primary/40 hover:bg-primary/10 px-1.5 py-0.5 rounded transition-all font-medium whitespace-nowrap">
+              ＋ Library
+            </button>
+          )
         )}
       </div>
       {value ? (
@@ -326,10 +346,6 @@ function UploadSlot({ label, value, onUpload, onClear, hint, onOpenLibrary }: Up
             </div>
           )}
           <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button onClick={() => inputRef.current?.click()}
-              className="p-1 rounded-full bg-black/60 text-white hover:bg-primary transition-colors">
-              <Upload size={11} />
-            </button>
             <button onClick={onClear}
               className="p-1 rounded-full bg-black/60 text-white hover:bg-destructive transition-colors">
               <X size={11} />
@@ -385,8 +401,18 @@ function BodySlot({ config, onChange, onClearSlot }: { config: ControllerConfig;
           section={`body-${config.controllerType}`}
           staticEntries={CONTROLLER_BODY_LIBRARY[config.controllerType] ?? []}
           current={config.controllerSkin}
-          onSelect={(url) => onChange({ controllerSkin: url })}
+          onSelect={(url, entry) => onChange({
+            controllerSkin: url,
+            // Carries a baked-with-bezels/home-button entry's placement,
+            // material, and protected-zone data along so the customer editor
+            // can offer material-swapping and logo-avoidance on it later —
+            // see LibraryEntry's bezelSlots/baseSkinNoBezels/homeButtonZone.
+            ...(entry.bezelSlots ? { bezelSlots: entry.bezelSlots } : {}),
+            ...(entry.baseSkinNoBezels ? { baseSkinNoBezels: entry.baseSkinNoBezels } : {}),
+            ...(entry.homeButtonZone ? { homeButtonZone: entry.homeButtonZone } : {}),
+          })}
           onClose={() => setShowLibrary(false)}
+          allowVideo
         />
       )}
       {config.controllerSkin ? (
@@ -416,10 +442,6 @@ function BodySlot({ config, onChange, onClearSlot }: { config: ControllerConfig;
               </div>
             )}
             <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button onClick={() => inputRef.current?.click()}
-                className="p-1 rounded-full bg-black/60 text-white hover:bg-primary transition-colors" title="Replace skin">
-                <Upload size={11} />
-              </button>
               {isVideo && (
                 <PopoverTrigger asChild>
                   <button className="p-1 rounded-full bg-black/60 text-violet-300 hover:bg-violet-600 transition-colors" title="Video options">

@@ -6,15 +6,20 @@ import { loadPresets, savePresets } from "./LibraryPicker";
 // Preset helpers — exported so Studio can use them
 // ─────────────────────────────────────────────────────────────────────────────
 // Full snapshot of an MKB preset — key/mouse mask overrides PLUS the full
-// appearance settings (mirrors Studio.tsx's MkbSettings, minus skin URLs,
-// which are excluded there too since they can be several MB and are always
-// reset to the built-in default paths on load). Presets used to only carry
+// appearance settings (mirrors Studio.tsx's MkbSettings) AND the actual
+// keyboard body/keys/mouse skin selection. Skin URLs are excluded from the
+// separate "last session state" localStorage settings (they can be several
+// MB and that store has a tight quota), but presets are written as real
+// files under Electron's userData with no such cap, so there's no reason to
+// drop them here — a saved preset should actually restore what it looked
+// like, library-picked skin included. Presets used to only carry
 // keyOverrides/mouseOverrides, so loading one silently dropped every color,
 // glow, RGB, and shadow setting.
 export interface MkbPreset {
   name: string;
   keyOverrides: Record<string,{cx:number;cy:number;w:number;h:number}>;
   mouseOverrides: {id:string;cx:number;cy:number;w:number;h:number}[];
+  kbSkinUrl?: string; kbButtonsUrl?: string; mouseSkinUrl?: string;
   kbSkinVideoFit?: "contain" | "cover";
   kbSkinContrast?: number; kbSkinSaturate?: number;
   mouseSkinVideoFit?: "contain" | "cover";
@@ -22,10 +27,10 @@ export interface MkbPreset {
   mkbColor?: string; mkbRgbStyle?: 1|2|3; mkbRainbow?: boolean; mouseColor?: string;
   keyPressColor?: string; keyPressOpacity?: number; keyPressGlow?: number;
   kbOpacity?: number; kbGlow?: number;
-  mouseOpacity?: number; mouseGlow?: number; mouseInnerFade?: boolean; mouseOuterFade?: boolean;
+  mouseOpacity?: number; mouseGlow?: number; mouseInnerFade?: boolean; mouseOuterFade?: boolean; mouseSnapBack?: boolean;
   mouseRgbEnabled?: boolean; mouseRgbMode?: "wave"|"breathing"; mouseRgbSpeed?: number;
   mouseRgbIntensity?: number; mouseRgbColor?: string; mouseRgbRainbow?: boolean;
-  mkbShowShadow?: boolean; mkbShadowIntensity?: number; mkbShadowAngle?: number;
+  mkbShowShadow?: boolean; mkbShadowIntensity?: number; mkbShadowDistance?: number; mkbShadowAngle?: number;
   mkbWidth?: number; mkbHeight?: number;
   savedAt: number;
 }
@@ -86,7 +91,7 @@ export const BASE_KEYS: KeyDef[] = [
   { code:"Space",       label:"SPACE", cx:62.02, cy:79.72, w:47.50, h:13.50 },
 ];
 
-const STYLE_CODES = ["Digit6","Digit7","Digit8"];
+export const STYLE_CODES = ["Digit6","Digit7","Digit8"];
 
 // Per-key colors for edit mode visibility — like controller button colors
 const KEY_COLORS: Record<string,string> = {
@@ -168,13 +173,16 @@ function RgbCanvas({ style, color, rainbow, pressedKeys, keyPositions }: {
         ctx.fillStyle = getC(hue, b);
         ctx.fillRect(0,0,W,H);
       } else if (style===2) {
-        // Wave — wider columns, high contrast, faster scroll
+        // Wave — wider columns, faster scroll. Floor raised (was a bare
+        // Math.pow(raw,2), which goes fully black at every trough) and the
+        // exponent softened — the old high-contrast falloff read as big
+        // dead-black gaps between keys instead of a smooth color wave.
         const colW = 6;
         for (let x=0; x<W; x+=colW) {
           const hue=(x/W + t*0.15)%1;
           const phase=(x/W)*Math.PI*6;
           const raw = 0.5+0.5*Math.sin(t*3 - phase);
-          const b = Math.pow(raw, 2) * 0.95;
+          const b = 0.18 + Math.pow(raw, 1.6) * 0.82;
           ctx.fillStyle=getC(hue, b);
           ctx.fillRect(x,0,colW,H);
         }
@@ -413,13 +421,107 @@ function isVideoSkin(url: string): boolean {
          url.endsWith(".webm") || url.endsWith(".mp4");
 }
 
+function hexToRgbaStr(hex:string,a:number){
+  const m=/^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if(!m) return `rgba(255,255,255,${a})`;
+  const n=parseInt(m[1],16);
+  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+}
+
+// Mouse button press — same recipe the controller face buttons and keyboard
+// keys use (instead of the old flat solid silhouette): the face darkens, an
+// inset shadow gives it depth, and a hollow ring in the mouse color glows
+// around the button's own shape, with the whole button sinking a hair like a
+// pressed key. `src` is the white silhouette PNG for the button; every layer
+// is that same silhouette used as a CSS mask. The ring's outer box punches the
+// button's own shape out of an oversized box so the glow only blooms OUTSIDE
+// the face (otherwise the blur fills the face solid, which is what read as
+// "flat" before). Mirrored in Studio.tsx's exported overlay.
+const PRESS_PAD=40;      // room around the button for the glow bloom (px)
+const PRESS_RING_GAP=3;  // ring thickness (px)
+function MouseBtnPress({src,color,amount,glow,outerFade,innerFade,pressed,boxW,boxH}:{
+  src:string; color:string; amount:number; glow:number; outerFade:boolean; innerFade:boolean; pressed:boolean;
+  boxW:number; boxH:number;
+}) {
+  // The old press was an <img> with objectFit:"contain", so the silhouette sat
+  // letterboxed at its own aspect ratio inside the mask's box. Masks stretch
+  // to fill their box by default, which blew every button up — so find the
+  // image's natural ratio and size the layers to the exact "contain" rect.
+  const [nat,setNat]=useState<{w:number;h:number}|null>(null);
+  useEffect(()=>{
+    let dead=false;
+    const im=new Image();
+    im.onload=()=>{ if(!dead&&im.naturalWidth&&im.naturalHeight) setNat({w:im.naturalWidth,h:im.naturalHeight}); };
+    im.src=src;
+    return()=>{dead=true;};
+  },[src]);
+  if(!nat) return null;
+  const fit=Math.min(boxW/nat.w,boxH/nat.h);
+  const cw=nat.w*fit, ch=nat.h*fit;
+  const shape=`url("${src}")`;
+  const maskBox=(imgs:string,sizes:string):React.CSSProperties=>({
+    WebkitMaskImage:imgs, maskImage:imgs,
+    WebkitMaskSize:sizes, maskSize:sizes,
+    WebkitMaskPosition:"center", maskPosition:"center",
+    WebkitMaskRepeat:"no-repeat", maskRepeat:"no-repeat",
+  });
+  const faceMask=maskBox(shape,"100% 100%");
+  // Full box minus the button's shape: black fill with the shape cut out.
+  const outsideMask:React.CSSProperties={
+    ...maskBox(`linear-gradient(black,black), ${shape}`,`100% 100%, calc(100% - ${PRESS_PAD*2}px) calc(100% - ${PRESS_PAD*2}px)`),
+    WebkitMaskComposite:"destination-out", maskComposite:"exclude",
+  } as React.CSSProperties;
+  const ringMask:React.CSSProperties={
+    ...maskBox(`${shape}, ${shape}`,`100% 100%, calc(100% - ${PRESS_RING_GAP*2}px) calc(100% - ${PRESS_RING_GAP*2}px)`),
+    WebkitMaskComposite:"destination-out", maskComposite:"exclude",
+  } as React.CSSProperties;
+  const g=Math.max(glow,1);
+  const ringFilter=
+    `blur(1.5px) drop-shadow(0 0 2px rgba(255,255,255,${0.9*amount})) `+
+    `drop-shadow(0 0 ${g*0.8}px ${hexToRgbaStr(color,amount)}) `+
+    `drop-shadow(0 0 ${g*1.6}px ${hexToRgbaStr(color,0.6*amount)}) `+
+    `drop-shadow(0 0 ${g*2.4}px ${hexToRgbaStr(color,0.3*amount)})`+
+    (outerFade?` drop-shadow(0 0 ${g*4}px ${hexToRgbaStr(color,0.25*amount)})`:"")+
+    (innerFade?" brightness(1.3)":"")+
+    ` drop-shadow(2px 3px 4px rgba(0,0,0,${0.55*amount}))`;
+  return (
+    <div style={{
+      position:"absolute",left:(boxW-cw)/2,top:(boxH-ch)/2,width:cw,height:ch,pointerEvents:"none",
+      transform:pressed?"translateY(1px) scaleY(0.96)":"translateY(0) scaleY(1)",
+      transition:"transform 0.06s cubic-bezier(0.4,0,0.2,1)",
+    }}>
+      {/* Darkened face */}
+      <div style={{position:"absolute",inset:0,...faceMask,
+        background:`rgba(0,0,0,${pressed?0.5*amount:0})`,transition:"background 0.06s"}}/>
+      {/* Inset shadow — blurred "outside the shape" layer clipped back to the shape */}
+      <div style={{position:"absolute",inset:0,...faceMask,overflow:"hidden",opacity:pressed?1:0,transition:"opacity 0.06s"}}>
+        <div style={{position:"absolute",inset:-PRESS_PAD,...outsideMask,
+          background:`rgba(0,0,0,${0.8*amount})`,filter:"blur(4px)",transform:"translateY(3px)"}}/>
+      </div>
+      {/* Hollow glowing ring — only blooms outside the face */}
+      <div style={{position:"absolute",inset:-PRESS_PAD,...outsideMask,display:pressed?"block":"none"}}>
+        <div style={{position:"absolute",inset:PRESS_PAD,filter:ringFilter}}>
+          <div style={{position:"absolute",inset:0,...ringMask,background:hexToRgbaStr(color,amount)}}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MouseView({skinUrl, color, editMode, opacity=1, glow=6, innerFade=false, outerFade=false, masks, onMasksChange, videoFit="contain", contrast=1, saturate=1,
   mouseRgbEnabled=false, mouseRgbMode="wave" as "wave"|"breathing", mouseRgbSpeed=6, mouseRgbIntensity=1, mouseRgbColor="#e40707", mouseRgbRainbow=true,
+  mouseSnapBack=true,
 }: {skinUrl:string; color:string; editMode:boolean; opacity?:number; glow?:number; innerFade?:boolean; outerFade?:boolean; masks:MouseMaskDef[]; onMasksChange:(m:MouseMaskDef[])=>void; videoFit?:"contain"|"cover"; contrast?:number; saturate?:number;
   mouseRgbEnabled?:boolean; mouseRgbMode?:"wave"|"breathing"; mouseRgbSpeed?:number; mouseRgbIntensity?:number; mouseRgbColor?:string; mouseRgbRainbow?:boolean;
+  mouseSnapBack?:boolean;
 }) {
   const [pos,setPos]=useState({x:0,y:0});
   const posRef=useRef({x:0,y:0});
+  // Read live inside the rAF loop below instead of as an effect dependency —
+  // that loop is set up once on mount and must keep running continuously
+  // without tearing down/rebuilding every time the toggle changes.
+  const snapBackRef=useRef(mouseSnapBack);
+  useEffect(()=>{ snapBackRef.current=mouseSnapBack; });
   const [btns,setBtns]=useState<Set<number>>(new Set());
   const [selectedMask,setSelectedMask]=useState<string|null>(null);
   const containerRef=useRef<HTMLDivElement>(null);
@@ -430,8 +532,21 @@ function MouseView({skinUrl, color, editMode, opacity=1, glow=6, innerFade=false
       posRef.current.x=clamp(posRef.current.x+e.movementX*0.5,-RADIUS,RADIUS);
       posRef.current.y=clamp(posRef.current.y+e.movementY*0.5,-RADIUS,RADIUS);
     };
-    const onDown=(e:MouseEvent)=>setBtns(p=>{const n=new Set(p);n.add(e.button);return n;});
-    const onUp  =(e:MouseEvent)=>setBtns(p=>{const n=new Set(p);n.delete(e.button);return n;});
+    // Safety net mirroring the export's WS path: if the matching mouseup
+    // never arrives (e.g. focus is lost mid-press), auto-release after a
+    // beat instead of leaving the button mask lit forever. Restarted by
+    // each new down, cleared by the real up, so a normal press-and-hold
+    // never trips it.
+    const releaseTimers: Record<number, ReturnType<typeof setTimeout>> = {};
+    const onDown=(e:MouseEvent)=>{
+      setBtns(p=>{const n=new Set(p);n.add(e.button);return n;});
+      clearTimeout(releaseTimers[e.button]);
+      releaseTimers[e.button]=setTimeout(()=>setBtns(p=>{const n=new Set(p);n.delete(e.button);return n;}),600);
+    };
+    const onUp=(e:MouseEvent)=>{
+      setBtns(p=>{const n=new Set(p);n.delete(e.button);return n;});
+      clearTimeout(releaseTimers[e.button]);
+    };
 
     // Light up scroll wheel (button index 1) while scrolling
     let scrollTimer: ReturnType<typeof setTimeout>;
@@ -443,7 +558,7 @@ function MouseView({skinUrl, color, editMode, opacity=1, glow=6, innerFade=false
 
     let raf:number;
     const decay=()=>{
-      posRef.current.x*=0.92; posRef.current.y*=0.92;
+      if(snapBackRef.current){ posRef.current.x*=0.92; posRef.current.y*=0.92; }
       setPos({x:posRef.current.x,y:posRef.current.y});
       raf=requestAnimationFrame(decay);
     };
@@ -452,7 +567,7 @@ function MouseView({skinUrl, color, editMode, opacity=1, glow=6, innerFade=false
     window.addEventListener("mousedown",onDown);
     window.addEventListener("mouseup",onUp);
     window.addEventListener("wheel",onWheel,{passive:true});
-    return()=>{window.removeEventListener("mousemove",onMove);window.removeEventListener("mousedown",onDown);window.removeEventListener("mouseup",onUp);window.removeEventListener("wheel",onWheel);cancelAnimationFrame(raf);clearTimeout(scrollTimer);};
+    return()=>{window.removeEventListener("mousemove",onMove);window.removeEventListener("mousedown",onDown);window.removeEventListener("mouseup",onUp);window.removeEventListener("wheel",onWheel);cancelAnimationFrame(raf);clearTimeout(scrollTimer);Object.values(releaseTimers).forEach(clearTimeout);};
   },[]);
 
   const masksRef = useRef(masks);
@@ -563,17 +678,16 @@ function MouseView({skinUrl, color, editMode, opacity=1, glow=6, innerFade=false
                 borderRadius:"4px",
                 zIndex:isSelected?20:10,
               }}>
-              <img src={m.src} alt={m.id} style={{
-                width:"100%",height:"100%",objectFit:"contain",
-                opacity: editMode ? 0.9 * opacity : pressed ? opacity : 0,
-                filter: pressed
-                  ? `drop-shadow(0 0 ${glow}px ${color})${outerFade?" drop-shadow(0 0 "+(glow*2)+"px "+color+")":""}${innerFade?" brightness(1.3)":""}`
-                  : editMode
-                  ? `drop-shadow(0 0 4px ${color}aa) drop-shadow(0 0 8px ${color}44)`
-                  : "none",
-                transition:"opacity 0.06s",
-                pointerEvents:"none",
-              }}/>
+              {editMode
+                ? <img src={m.src} alt={m.id} style={{
+                    width:"100%",height:"100%",objectFit:"contain",
+                    opacity: 0.9 * opacity,
+                    filter: `drop-shadow(0 0 4px ${color}aa) drop-shadow(0 0 8px ${color}44)`,
+                    pointerEvents:"none",
+                  }}/>
+                : <MouseBtnPress src={m.src} color={color} amount={opacity} glow={glow}
+                    outerFade={outerFade} innerFade={innerFade} pressed={pressed}
+                    boxW={m.w/100*294-2} boxH={m.h/100*392-2}/>}
               {/* Resize grip */}
               {isSelected&&(
                 <div onMouseDown={e=>startMaskDrag(e,m.id,true)}
@@ -623,6 +737,7 @@ interface Props {
   mouseGlow: number;
   mouseInnerFade: boolean;
   mouseOuterFade: boolean;
+  mouseSnapBack: boolean;
   mouseRgbEnabled?: boolean;
   mouseRgbMode?: "wave"|"breathing";
   mouseRgbSpeed?: number;
@@ -631,6 +746,7 @@ interface Props {
   mouseRgbRainbow?: boolean;
   mkbShowShadow: boolean;
   mkbShadowIntensity: number;
+  mkbShadowDistance: number;
   mkbShadowAngle: number;
   rgbStyle: 1|2|3;
   onRgbStyleChange: (s:1|2|3)=>void;
@@ -654,7 +770,7 @@ interface Props {
   onGetMasksRef?: React.MutableRefObject<()=>{id:string;cx:number;cy:number;w:number;h:number}[]>;
 }
 
-export function MkbView({color,keyPressColor,keyPressOpacity,keyPressGlow,mouseColor,kbOpacity,kbGlow,mouseOpacity,mouseGlow,mouseInnerFade,mouseOuterFade,mouseRgbEnabled=false,mouseRgbMode="wave" as "wave"|"breathing",mouseRgbSpeed=6,mouseRgbIntensity=1,mouseRgbColor="#e40707",mouseRgbRainbow=true,mkbShowShadow,mkbShadowIntensity,mkbShadowAngle,rgbStyle,onRgbStyleChange,rainbow,onRainbowChange,onRgbOff,keyboardSkinUrl,mouseSkinUrl,keyboardButtonsUrl,kbSkinVideoFit="contain",kbSkinContrast=1,kbSkinSaturate=1,mouseSkinVideoFit="contain",mouseSkinContrast=1,mouseSkinSaturate=1,editMode,keyOverrides,mouseOverrides,onKeyOverridesChange,onMouseOverridesChange,onGetMasksRef}:Props) {
+export function MkbView({color,keyPressColor,keyPressOpacity,keyPressGlow,mouseColor,kbOpacity,kbGlow,mouseOpacity,mouseGlow,mouseInnerFade,mouseOuterFade,mouseSnapBack,mouseRgbEnabled=false,mouseRgbMode="wave" as "wave"|"breathing",mouseRgbSpeed=6,mouseRgbIntensity=1,mouseRgbColor="#e40707",mouseRgbRainbow=true,mkbShowShadow,mkbShadowIntensity,mkbShadowDistance,mkbShadowAngle,rgbStyle,onRgbStyleChange,rainbow,onRainbowChange,onRgbOff,keyboardSkinUrl,mouseSkinUrl,keyboardButtonsUrl,kbSkinVideoFit="contain",kbSkinContrast=1,kbSkinSaturate=1,mouseSkinVideoFit="contain",mouseSkinContrast=1,mouseSkinSaturate=1,editMode,keyOverrides,mouseOverrides,onKeyOverridesChange,onMouseOverridesChange,onGetMasksRef}:Props) {
   const [pressedKeys,setPressedKeys]=useState<Set<string>>(new Set());
   // CapsLock is visually distinct from a normal key press: capsLockOn is the
   // persistent toggle state (lit with a lighter "resting active" look for as
@@ -814,8 +930,8 @@ export function MkbView({color,keyPressColor,keyPressOpacity,keyPressGlow,mouseC
           style={{width:"800px",aspectRatio:"1344/799",
             filter: mkbShowShadow ? (() => {
               const rad = (mkbShadowAngle * Math.PI) / 180;
-              const x = Math.round(Math.sin(rad) * 12 * mkbShadowIntensity);
-              const y = Math.round(Math.cos(rad) * 12 * mkbShadowIntensity);
+              const x = Math.round(Math.sin(rad) * mkbShadowDistance);
+              const y = Math.round(Math.cos(rad) * mkbShadowDistance);
               const a = mkbShadowIntensity;
               return `drop-shadow(${x}px ${y}px 24px rgba(0,0,0,${a})) drop-shadow(${Math.round(x*0.4)}px ${Math.round(y*0.4)}px 8px rgba(0,0,0,${Math.min(a+0.1,1)}))`;
             })() : "none"
@@ -929,14 +1045,14 @@ export function MkbView({color,keyPressColor,keyPressOpacity,keyPressGlow,mouseC
         <div className="flex-shrink-0" style={{width:"308px",height:"392px",
           filter: mkbShowShadow ? (() => {
             const rad = (mkbShadowAngle * Math.PI) / 180;
-            const x = Math.round(Math.sin(rad) * 12 * mkbShadowIntensity);
-            const y = Math.round(Math.cos(rad) * 12 * mkbShadowIntensity);
+            const x = Math.round(Math.sin(rad) * mkbShadowDistance);
+            const y = Math.round(Math.cos(rad) * mkbShadowDistance);
             const a = mkbShadowIntensity;
             return `drop-shadow(${x}px ${y}px 24px rgba(0,0,0,${a})) drop-shadow(${Math.round(x*0.4)}px ${Math.round(y*0.4)}px 8px rgba(0,0,0,${Math.min(a+0.1,1)}))`;
           })() : "none"
         }}>
           <MouseView skinUrl={mouseSkinUrl} color={mouseColor} editMode={editMode}
-            opacity={mouseOpacity} glow={mouseGlow} innerFade={mouseInnerFade} outerFade={mouseOuterFade}
+            opacity={mouseOpacity} glow={mouseGlow} innerFade={mouseInnerFade} outerFade={mouseOuterFade} mouseSnapBack={mouseSnapBack}
             videoFit={mouseSkinVideoFit} contrast={mouseSkinContrast} saturate={mouseSkinSaturate}
             mouseRgbEnabled={mouseRgbEnabled} mouseRgbMode={mouseRgbMode} mouseRgbSpeed={mouseRgbSpeed}
             mouseRgbIntensity={mouseRgbIntensity} mouseRgbColor={mouseRgbColor} mouseRgbRainbow={mouseRgbRainbow}
